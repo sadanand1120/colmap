@@ -107,9 +107,10 @@ class MapperProgress {
 
   void SetBoundedWork(std::string label,
                       const size_t current,
-                      const size_t total) {
+                      const size_t total,
+                      const bool show_single_item = false) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (total <= 1) {
+    if (total == 0 || (total == 1 && !show_single_item)) {
       has_bounded_work_ = false;
       if (current == total) {
         stage_ = std::move(label);
@@ -129,12 +130,13 @@ class MapperProgress {
   void SetLoopBoundedWork(const size_t stage_index,
                           std::string label,
                           const size_t current,
-                          const size_t total) {
-    if (total <= 1) {
+                          const size_t total,
+                          const bool show_single_item = false) {
+    if (total == 0 || (total == 1 && !show_single_item)) {
       SetLoopStage(stage_index, std::move(label));
       return;
     }
-    SetBoundedWork(std::move(label), current, total);
+    SetBoundedWork(std::move(label), current, total, show_single_item);
   }
 
   void ClearBoundedWork() {
@@ -976,9 +978,7 @@ IncrementalPipeline::Status IncrementalPipeline::ReconstructSubModel(
     for (const bool structure_less : structure_less_flags) {
       progress_->ClearBoundedWork();
       progress_->SetLoopStage(kMapperLoopStageImageRegistration,
-                              structure_less
-                                  ? "Finding structure-less image candidates"
-                                  : "Finding image candidates");
+                              "Image registration");
       const std::vector<image_t> next_images = mapper.FindNextImages(
           mapper_options, /*structure_less=*/structure_less);
       const std::string candidate_label =
@@ -986,30 +986,30 @@ IncrementalPipeline::Status IncrementalPipeline::ReconstructSubModel(
 
       for (size_t reg_trial = 0; reg_trial < next_images.size(); ++reg_trial) {
         next_image_id = next_images[reg_trial];
-        progress_->SetLoopBoundedWork(kMapperLoopStageImageRegistration,
-                                      candidate_label,
-                                      reg_trial + 1,
-                                      next_images.size());
-
-        progress_->SetLoopStage(
-            kMapperLoopStageImageRegistration,
-            StringPrintf(
-                "Registering image #%d (%d/%d visible points)",
-                next_image_id,
-                mapper.ObservationManager().NumVisiblePoints3D(next_image_id),
-                mapper.ObservationManager().NumObservations(next_image_id)));
+        std::string candidate_detail = StringPrintf(
+            "%s: registering image #%d (%d/%d visible points)",
+            candidate_label.c_str(),
+            next_image_id,
+            mapper.ObservationManager().NumVisiblePoints3D(next_image_id),
+            mapper.ObservationManager().NumObservations(next_image_id));
 
         if (structure_less) {
-          progress_->SetLoopStage(
-              kMapperLoopStageImageRegistration,
-              StringPrintf(
-                  "Registering image #%d with structure-less fallback "
-                  "(%d/%d correspondences)",
-                  next_image_id,
-                  mapper.ObservationManager().NumVisibleCorrespondences(
-                      next_image_id),
-                  mapper.ObservationManager().NumCorrespondences(
-                      next_image_id)));
+          candidate_detail = StringPrintf(
+              "%s: registering image #%d (%d/%d correspondences)",
+              candidate_label.c_str(),
+              next_image_id,
+              mapper.ObservationManager().NumVisibleCorrespondences(
+                  next_image_id),
+              mapper.ObservationManager().NumCorrespondences(next_image_id));
+        }
+
+        progress_->SetLoopBoundedWork(kMapperLoopStageImageRegistration,
+                                      candidate_detail,
+                                      reg_trial + 1,
+                                      next_images.size(),
+                                      /*show_single_item=*/true);
+
+        if (structure_less) {
           reg_next_success = mapper.RegisterNextStructureLessImage(
               mapper_options, next_image_id);
         } else {
@@ -1020,11 +1020,14 @@ IncrementalPipeline::Status IncrementalPipeline::ReconstructSubModel(
         if (reg_next_success) {
           break;
         } else {
-          progress_->SetLoopStage(
+          progress_->SetLoopBoundedWork(
               kMapperLoopStageImageRegistration,
-              StringPrintf("Image #%d failed registration; trying next "
-                           "candidate",
-                           next_image_id));
+              StringPrintf("%s: image #%d failed registration",
+                           candidate_label.c_str(),
+                           next_image_id),
+              reg_trial + 1,
+              next_images.size(),
+              /*show_single_item=*/true);
 
           // If initial model fails to continue for some time,
           // abort and try different initial pair.
