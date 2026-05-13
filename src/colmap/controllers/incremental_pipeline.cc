@@ -35,7 +35,273 @@
 #include "colmap/util/file.h"
 #include "colmap/util/timer.h"
 
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <mutex>
+#include <sstream>
+#include <thread>
+#include <unordered_set>
+
+#ifndef _WIN32
+#include <unistd.h>
+#endif
+
 namespace colmap {
+
+class MapperProgress {
+ public:
+  explicit MapperProgress(const size_t total_images)
+      : total_images_(total_images),
+#ifdef _WIN32
+        enabled_(false),
+#else
+        enabled_(isatty(fileno(stderr))),
+#endif
+        output_fd_(-1),
+        finished_(false),
+        rendered_lines_(0) {
+    timer_.Start();
+#ifndef _WIN32
+    if (enabled_) {
+      output_fd_ = dup(fileno(stderr));
+    }
+#endif
+    if (IsEnabled()) {
+      heartbeat_thread_ = std::thread([this]() { HeartbeatLoop(); });
+    }
+  }
+
+  ~MapperProgress() {
+    StopHeartbeat();
+    std::lock_guard<std::mutex> lock(mutex_);
+    ClearLocked();
+#ifndef _WIN32
+    if (output_fd_ != -1) {
+      close(output_fd_);
+      output_fd_ = -1;
+    }
+#endif
+  }
+
+  void SetStage(std::string stage) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    stage_ = std::move(stage);
+    RenderLocked();
+  }
+
+  void SetBoundedWork(std::string label,
+                      const size_t current,
+                      const size_t total) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (total <= 1) {
+      has_bounded_work_ = false;
+      if (current == total) {
+        stage_ = std::move(label);
+      }
+      RenderLocked();
+      return;
+    }
+    const bool start_new_work = !has_bounded_work_ || bounded_label_ != label ||
+                                bounded_total_ != total;
+    bounded_label_ = std::move(label);
+    bounded_current_ = std::min(current, total);
+    bounded_total_ = total;
+    has_bounded_work_ = true;
+    RenderLocked(start_new_work || bounded_current_ == bounded_total_);
+  }
+
+  void ClearBoundedWork() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!has_bounded_work_) {
+      return;
+    }
+    has_bounded_work_ = false;
+    RenderLocked(true);
+  }
+
+  void MarkRegisteredImage(const image_t image_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (image_id != kInvalidImageId &&
+        registered_image_ids_.insert(image_id).second) {
+      RenderLocked();
+    }
+  }
+
+  void MarkRegisteredFrame(const Frame& frame) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    bool changed = false;
+    for (const data_t& data_id : frame.ImageIds()) {
+      if (data_id.id != kInvalidImageId) {
+        changed |= registered_image_ids_.insert(data_id.id).second;
+      }
+    }
+    if (changed) {
+      RenderLocked();
+    }
+  }
+
+  void Finish(const std::string& stage) {
+    StopHeartbeat();
+    size_t num_registered_images = 0;
+    std::string elapsed;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (finished_) {
+        return;
+      }
+      stage_ = stage;
+      has_bounded_work_ = false;
+      RenderLocked(true);
+      ClearLocked();
+      num_registered_images = registered_image_ids_.size();
+      elapsed = FormatElapsed();
+      finished_ = true;
+    }
+    if (IsEnabled()) {
+      Write(StringPrintf("Mapper: %s (%zu/%zu unique images, %s)\n",
+                         stage.c_str(),
+                         num_registered_images,
+                         total_images_,
+                         elapsed.c_str()));
+    }
+  }
+
+  void ClearForLog() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ClearLocked();
+  }
+
+ private:
+  static std::string MakeBar(const size_t current,
+                             const size_t total,
+                             const size_t width) {
+    if (total == 0) {
+      return std::string(width, '-');
+    }
+    const size_t filled = std::min(width, width * current / total);
+    return std::string(filled, '=') + std::string(width - filled, '-');
+  }
+
+  static std::string FormatPercent(const size_t current, const size_t total) {
+    if (total == 0) {
+      return "  0.0%";
+    }
+    return StringPrintf(
+        "%5.1f%%",
+        100.0 * static_cast<double>(current) / static_cast<double>(total));
+  }
+
+  std::string FormatElapsed() const {
+    const double seconds = timer_.ElapsedSeconds();
+    if (seconds < 60.0) {
+      return StringPrintf("%.1fs", seconds);
+    }
+    return StringPrintf("%.1fm", seconds / 60.0);
+  }
+
+  void HeartbeatLoop() {
+    while (!heartbeat_stop_.load(std::memory_order_relaxed)) {
+      std::this_thread::sleep_for(kHeartbeatInterval);
+      if (heartbeat_stop_.load(std::memory_order_relaxed)) {
+        break;
+      }
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!finished_ && rendered_lines_ > 0 && !has_bounded_work_) {
+        RenderLocked(true);
+      }
+    }
+  }
+
+  void StopHeartbeat() {
+    heartbeat_stop_.store(true, std::memory_order_relaxed);
+    if (heartbeat_thread_.joinable()) {
+      heartbeat_thread_.join();
+    }
+  }
+
+  bool IsEnabled() const { return enabled_ && output_fd_ != -1; }
+
+  void Write(const std::string& text) {
+#ifndef _WIN32
+    if (output_fd_ != -1) {
+      const ssize_t num_bytes = write(output_fd_, text.data(), text.size());
+      (void)num_bytes;
+    }
+#endif
+  }
+
+  void ClearLocked() {
+    if (!IsEnabled() || rendered_lines_ == 0) {
+      rendered_lines_ = 0;
+      return;
+    }
+    Write("\r\033[2K");
+    for (size_t i = 1; i < rendered_lines_; ++i) {
+      Write("\033[1A\r\033[2K");
+    }
+    rendered_lines_ = 0;
+    last_render_at_ = std::chrono::steady_clock::time_point::min();
+  }
+
+  void RenderLocked(const bool force = false) {
+    if (!IsEnabled() || finished_) {
+      return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (!force && rendered_lines_ > 0 &&
+        now - last_render_at_ < kMinRenderInterval) {
+      return;
+    }
+
+    const size_t current = registered_image_ids_.size();
+    std::ostringstream line1;
+    line1 << "Unique registered images [" << MakeBar(current, total_images_, 28)
+          << "] " << current << "/" << total_images_ << " "
+          << FormatPercent(current, total_images_) << " | " << stage_ << " | "
+          << FormatElapsed();
+
+    std::ostringstream line2;
+    if (has_bounded_work_) {
+      line2 << "  " << bounded_label_ << " ["
+            << MakeBar(bounded_current_, bounded_total_, 24) << "] "
+            << bounded_current_ << "/" << bounded_total_ << " "
+            << FormatPercent(bounded_current_, bounded_total_);
+    }
+
+    ClearLocked();
+    Write(line1.str());
+    rendered_lines_ = 1;
+    if (has_bounded_work_) {
+      Write("\n" + line2.str());
+      rendered_lines_ = 2;
+    }
+    last_render_at_ = now;
+  }
+
+  static constexpr auto kMinRenderInterval = std::chrono::milliseconds(120);
+  static constexpr auto kHeartbeatInterval = std::chrono::seconds(1);
+
+  Timer timer_;
+  const size_t total_images_;
+  const bool enabled_;
+  int output_fd_;
+  std::atomic<bool> heartbeat_stop_{false};
+  std::thread heartbeat_thread_;
+  std::mutex mutex_;
+  bool finished_;
+  size_t rendered_lines_;
+  std::chrono::steady_clock::time_point last_render_at_ =
+      std::chrono::steady_clock::time_point::min();
+  std::string stage_ = "Starting";
+  std::unordered_set<image_t> registered_image_ids_;
+  bool has_bounded_work_ = false;
+  std::string bounded_label_;
+  size_t bounded_current_ = 0;
+  size_t bounded_total_ = 0;
+};
+
 namespace {
 
 void CustomizeIncrementalPipelineOptions(const DatabaseCache& database_cache,
@@ -72,10 +338,14 @@ DatabaseCache::Options CreateDatabaseCacheOptions(
   return database_cache_options;
 }
 
-void IterativeGlobalRefinement(const IncrementalPipelineOptions& options,
+void IterativeGlobalRefinement(MapperProgress* progress,
+                               const IncrementalPipelineOptions& options,
                                const IncrementalMapper::Options& mapper_options,
                                IncrementalMapper& mapper) {
-  LOG(INFO) << "Retriangulation and Global bundle adjustment";
+  if (progress != nullptr) {
+    progress->SetStage("Retriangulation and global bundle adjustment");
+    progress->ClearBoundedWork();
+  }
   mapper.IterativeGlobalRefinement(options.ba_global_max_refinements,
                                    options.ba_global_max_refinement_change,
                                    mapper_options,
@@ -86,8 +356,12 @@ void IterativeGlobalRefinement(const IncrementalPipelineOptions& options,
 
 void ExtractColors(const std::filesystem::path& image_path,
                    const image_t image_id,
-                   Reconstruction& reconstruction) {
+                   Reconstruction& reconstruction,
+                   MapperProgress* progress = nullptr) {
   if (!reconstruction.ExtractColorsForImage(image_id, image_path)) {
+    if (progress != nullptr) {
+      progress->ClearForLog();
+    }
     LOG(WARNING) << "Could not read image "
                  << reconstruction.Image(image_id).Name() << " at path "
                  << image_path << ".";
@@ -96,7 +370,6 @@ void ExtractColors(const std::filesystem::path& image_path,
 
 void WriteSnapshot(const Reconstruction& reconstruction,
                    const std::filesystem::path& snapshot_path) {
-  LOG(INFO) << "Creating snapshot";
   // Get the current timestamp in milliseconds.
   const size_t timestamp =
       std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -123,6 +396,15 @@ bool HasUnknownSensorFromRig(const Reconstruction& reconstruction) {
     }
   }
   return false;
+}
+
+size_t CountFrameImages(const Frame& frame) {
+  size_t count = 0;
+  for (const data_t& data_id : frame.ImageIds()) {
+    (void)data_id;
+    count += 1;
+  }
+  return count;
 }
 
 }  // namespace
@@ -271,6 +553,7 @@ IncrementalPipeline::IncrementalPipeline(
   timer.PrintMinutes();
 
   CustomizeIncrementalPipelineOptions(*database_cache_, *options_);
+  progress_ = std::make_unique<MapperProgress>(database_cache_->NumImages());
 
   RegisterCallbacks();
 }
@@ -291,19 +574,25 @@ IncrementalPipeline::IncrementalPipeline(
       CreateDatabaseCacheOptions(*options_, *reconstruction_manager_));
 
   CustomizeIncrementalPipelineOptions(*database_cache_, *options_);
+  progress_ = std::make_unique<MapperProgress>(database_cache_->NumImages());
 
   RegisterCallbacks();
 }
 
+IncrementalPipeline::~IncrementalPipeline() = default;
+
 void IncrementalPipeline::Run() {
   total_run_timer_->Start();
+  progress_->SetStage("Starting mapper");
 
   if (database_cache_->NumImages() == 0) {
+    progress_->ClearForLog();
     LOG(WARNING) << "No images with matches";
     return;
   }
 
   if (options_->use_prior_position && database_cache_->NumPosePriors() == 0) {
+    progress_->ClearForLog();
     LOG(WARNING) << "No pose priors";
     return;
   }
@@ -323,6 +612,7 @@ void IncrementalPipeline::Run() {
                   mapper_options,
                   /*continue_reconstruction=*/continue_reconstruction) ==
       Status::STOP) {
+    progress_->Finish("Complete");
     total_run_timer_->PrintMinutes();
     return;
   }
@@ -338,7 +628,8 @@ void IncrementalPipeline::Run() {
       break;
     }
 
-    LOG(INFO) << "=> Relaxing the initialization constraints.";
+    progress_->SetStage("Relaxing initialization inlier threshold");
+    progress_->ClearBoundedWork();
     mapper_options.init_min_num_inliers /= 2;
     mapper.ResetInitializationStats();
     if (Reconstruct(mapper,
@@ -351,7 +642,8 @@ void IncrementalPipeline::Run() {
       break;
     }
 
-    LOG(INFO) << "=> Relaxing the initialization constraints.";
+    progress_->SetStage("Relaxing initialization triangulation threshold");
+    progress_->ClearBoundedWork();
     mapper_options.init_min_tri_angle /= 2;
     mapper.ResetInitializationStats();
     if (Reconstruct(mapper,
@@ -361,6 +653,7 @@ void IncrementalPipeline::Run() {
     }
   }
 
+  progress_->Finish("Complete");
   total_run_timer_->PrintMinutes();
 }
 
@@ -374,49 +667,63 @@ IncrementalPipeline::Status IncrementalPipeline::InitializeReconstruction(
   // Try to find good initial pair.
   Rigid3d cam2_from_cam1;
   if (!options_->IsInitialPairProvided()) {
-    LOG(INFO) << "Finding good initial image pair";
+    progress_->SetStage("Finding initial image pair");
+    progress_->ClearBoundedWork();
     const bool find_init_success = mapper.FindInitialImagePair(
         mapper_options, image_id1, image_id2, cam2_from_cam1);
     if (!find_init_success) {
-      LOG(INFO) << "=> No good initial image pair found.";
+      progress_->SetStage("No initial image pair found");
       return Status::NO_INITIAL_PAIR;
     }
   } else {
     if (!reconstruction.ExistsImage(image_id1) ||
         !reconstruction.ExistsImage(image_id2)) {
-      LOG(INFO) << StringPrintf(
-          "=> Initial image pair #%d and #%d does not exist.",
-          image_id1,
-          image_id2);
+      progress_->SetStage(StringPrintf(
+          "Initial image pair #%d/#%d missing", image_id1, image_id2));
       return Status::NO_INITIAL_PAIR;
     }
+    progress_->SetStage(StringPrintf(
+        "Checking initial image pair #%d/#%d", image_id1, image_id2));
+    progress_->ClearBoundedWork();
     const bool provided_init_success = mapper.EstimateInitialTwoViewGeometry(
         mapper_options, image_id1, image_id2, cam2_from_cam1);
     if (!provided_init_success) {
-      LOG(INFO) << "=> Provided pair is unsuitable for initialization.";
+      progress_->SetStage("Provided initial pair is unsuitable");
       return Status::BAD_INITIAL_PAIR;
     }
   }
 
-  LOG(INFO) << StringPrintf(
-      "Registering initial image pair #%d and #%d", image_id1, image_id2);
+  progress_->SetStage(StringPrintf(
+      "Registering initial image pair #%d/#%d", image_id1, image_id2));
+  progress_->ClearBoundedWork();
   mapper.RegisterInitialImagePair(
       mapper_options, image_id1, image_id2, cam2_from_cam1);
+  progress_->MarkRegisteredFrame(*reconstruction.Image(image_id1).FramePtr());
+  progress_->MarkRegisteredFrame(*reconstruction.Image(image_id2).FramePtr());
 
   IncrementalTriangulator::Options tri_options = options_->Triangulation();
   tri_options.min_angle = mapper_options.init_min_tri_angle;
+  size_t init_num_views = 0;
+  for (const image_t image_id : {image_id1, image_id2}) {
+    init_num_views +=
+        CountFrameImages(*reconstruction.Image(image_id).FramePtr());
+  }
+  size_t tri_image_idx = 0;
   for (const image_t image_id : {image_id1, image_id2}) {
     const Image& image = reconstruction.Image(image_id);
     for (const data_t& data_id : image.FramePtr()->ImageIds()) {
+      progress_->SetBoundedWork(
+          "Initial triangulation", ++tri_image_idx, init_num_views);
       mapper.TriangulateImage(tri_options, data_id.id);
     }
   }
+  progress_->ClearBoundedWork();
 
   if (reconstruction.NumPoints3D() == 0) {
     return Status::BAD_INITIAL_PAIR;
   }
 
-  LOG(INFO) << "Global bundle adjustment";
+  progress_->SetStage("Initial global bundle adjustment");
   mapper.AdjustGlobalBundle(mapper_options, options_->GlobalBundleAdjustment());
   reconstruction.Normalize();
   mapper.FilterPoints(mapper_options);
@@ -434,12 +741,17 @@ IncrementalPipeline::Status IncrementalPipeline::InitializeReconstruction(
   }
 
   if (options_->extract_colors) {
+    size_t color_idx = 0;
     for (const image_t image_id : {image_id1, image_id2}) {
       const Image& image = reconstruction.Image(image_id);
       for (const data_t& data_id : image.FramePtr()->ImageIds()) {
-        ExtractColors(options_->image_path, data_id.id, reconstruction);
+        progress_->SetBoundedWork(
+            "Initial color extraction", ++color_idx, init_num_views);
+        ExtractColors(
+            options_->image_path, data_id.id, reconstruction, progress_.get());
       }
     }
+    progress_->ClearBoundedWork();
   }
   return Status::SUCCESS;
 }
@@ -462,9 +774,15 @@ IncrementalPipeline::Status IncrementalPipeline::ReconstructSubModel(
     IncrementalMapper& mapper,
     const IncrementalMapper::Options& mapper_options,
     const std::shared_ptr<Reconstruction>& reconstruction) {
+  progress_->SetStage("Starting reconstruction");
+  progress_->ClearBoundedWork();
   mapper.BeginReconstruction(reconstruction);
+  for (const frame_t frame_id : reconstruction->RegFrameIds()) {
+    progress_->MarkRegisteredFrame(reconstruction->Frame(frame_id));
+  }
 
   if (HasUnknownSensorFromRig(*reconstruction)) {
+    progress_->SetStage("Unknown rig sensor pose");
     return Status::UNKNOWN_SENSOR_FROM_RIG;
   }
 
@@ -517,26 +835,28 @@ IncrementalPipeline::Status IncrementalPipeline::ReconstructSubModel(
     for (const bool structure_less : structure_less_flags) {
       const std::vector<image_t> next_images = mapper.FindNextImages(
           mapper_options, /*structure_less=*/structure_less);
+      const std::string candidate_label =
+          structure_less ? "Structure-less candidates" : "Image candidates";
 
       for (size_t reg_trial = 0; reg_trial < next_images.size(); ++reg_trial) {
         next_image_id = next_images[reg_trial];
+        progress_->SetBoundedWork(
+            candidate_label, reg_trial + 1, next_images.size());
 
-        LOG(INFO) << StringPrintf("Registering image #%d (num_reg_frames=%d)",
-                                  next_image_id,
-                                  reconstruction->NumRegFrames());
-        LOG(INFO) << StringPrintf(
-            "=> Image sees %d / %d points",
+        progress_->SetStage(StringPrintf(
+            "Registering image #%d (%d/%d visible points)",
+            next_image_id,
             mapper.ObservationManager().NumVisiblePoints3D(next_image_id),
-            mapper.ObservationManager().NumObservations(next_image_id));
+            mapper.ObservationManager().NumObservations(next_image_id)));
 
         if (structure_less) {
-          LOG(INFO) << StringPrintf(
-              "Registering image with structure-less fallback");
-          LOG(INFO) << StringPrintf(
-              "=> Image sees %d / %d correspondences",
+          progress_->SetStage(StringPrintf(
+              "Registering image #%d with structure-less fallback "
+              "(%d/%d correspondences)",
+              next_image_id,
               mapper.ObservationManager().NumVisibleCorrespondences(
                   next_image_id),
-              mapper.ObservationManager().NumCorrespondences(next_image_id));
+              mapper.ObservationManager().NumCorrespondences(next_image_id)));
           reg_next_success = mapper.RegisterNextStructureLessImage(
               mapper_options, next_image_id);
         } else {
@@ -547,7 +867,9 @@ IncrementalPipeline::Status IncrementalPipeline::ReconstructSubModel(
         if (reg_next_success) {
           break;
         } else {
-          LOG(INFO) << "=> Could not register, trying another image.";
+          progress_->SetStage(StringPrintf(
+              "Image #%d failed registration; trying next candidate",
+              next_image_id));
 
           // If initial model fails to continue for some time,
           // abort and try different initial pair.
@@ -567,9 +889,18 @@ IncrementalPipeline::Status IncrementalPipeline::ReconstructSubModel(
 
     if (reg_next_success) {
       const Image& image = reconstruction->Image(next_image_id);
+      progress_->MarkRegisteredFrame(*image.FramePtr());
+      size_t image_data_idx = 0;
+      const size_t num_frame_images = CountFrameImages(*image.FramePtr());
       for (const data_t& data_id : image.FramePtr()->ImageIds()) {
+        progress_->SetBoundedWork("Triangulating registered frame",
+                                  ++image_data_idx,
+                                  num_frame_images);
         mapper.TriangulateImage(options_->Triangulation(), data_id.id);
       }
+      progress_->ClearBoundedWork();
+      progress_->SetStage(
+          StringPrintf("Local refinement after image #%d", next_image_id));
       mapper.IterativeLocalRefinement(options_->ba_local_max_refinements,
                                       options_->ba_local_max_refinement_change,
                                       mapper_options,
@@ -579,20 +910,30 @@ IncrementalPipeline::Status IncrementalPipeline::ReconstructSubModel(
 
       if (CheckRunGlobalRefinement(
               *reconstruction, ba_prev_num_reg_frames, ba_prev_num_points)) {
-        IterativeGlobalRefinement(*options_, mapper_options, mapper);
+        IterativeGlobalRefinement(
+            progress_.get(), *options_, mapper_options, mapper);
         ba_prev_num_points = reconstruction->NumPoints3D();
         ba_prev_num_reg_frames = reconstruction->NumRegFrames();
       }
 
       if (options_->extract_colors) {
+        image_data_idx = 0;
         for (const data_t& data_id : image.FramePtr()->ImageIds()) {
-          ExtractColors(options_->image_path, data_id.id, *reconstruction);
+          progress_->SetBoundedWork(
+              "Extracting colors", ++image_data_idx, num_frame_images);
+          ExtractColors(options_->image_path,
+                        data_id.id,
+                        *reconstruction,
+                        progress_.get());
         }
+        progress_->ClearBoundedWork();
       }
 
       if (options_->snapshot_frames_freq > 0 &&
           reconstruction->NumRegFrames() >=
               options_->snapshot_frames_freq + snapshot_prev_num_reg_frames) {
+        progress_->SetStage("Writing reconstruction snapshot");
+        progress_->ClearBoundedWork();
         snapshot_prev_num_reg_frames = reconstruction->NumRegFrames();
         WriteSnapshot(*reconstruction, options_->snapshot_path);
       }
@@ -610,7 +951,8 @@ IncrementalPipeline::Status IncrementalPipeline::ReconstructSubModel(
     // bundle adjustment and try again to register one image. If this fails
     // once, then exit the incremental mapping.
     if (!reg_next_success && prev_reg_next_success) {
-      IterativeGlobalRefinement(*options_, mapper_options, mapper);
+      IterativeGlobalRefinement(
+          progress_.get(), *options_, mapper_options, mapper);
     }
   } while (reg_next_success || prev_reg_next_success);
 
@@ -622,7 +964,8 @@ IncrementalPipeline::Status IncrementalPipeline::ReconstructSubModel(
   if (reconstruction->NumRegFrames() > 0 &&
       reconstruction->NumRegFrames() != ba_prev_num_reg_frames &&
       reconstruction->NumPoints3D() != ba_prev_num_points) {
-    IterativeGlobalRefinement(*options_, mapper_options, mapper);
+    IterativeGlobalRefinement(
+        progress_.get(), *options_, mapper_options, mapper);
   }
   return Status::SUCCESS;
 }
@@ -636,6 +979,8 @@ IncrementalPipeline::Status IncrementalPipeline::Reconstruct(
     if (CheckIfStopped() || CheckReachedMaxRuntime()) {
       return Status::STOP;
     }
+    progress_->SetBoundedWork(
+        "Initialization trials", num_trials + 1, options_->init_num_trials);
 
     const size_t reconstruction_idx =
         (!continue_reconstruction || num_trials > 0)
@@ -649,7 +994,8 @@ IncrementalPipeline::Status IncrementalPipeline::Reconstruct(
     switch (status) {
       case Status::INTERRUPTED: {
         reconstruction->UpdatePoint3DErrors();
-        LOG(INFO) << "Keeping reconstruction due to interrupt";
+        progress_->SetStage("Keeping reconstruction after interrupt");
+        progress_->ClearBoundedWork();
         mapper.EndReconstruction(/*discard=*/false);
         AlignReconstructionToOrigRigScales(database_cache_->Rigs(),
                                            reconstruction.get());
@@ -657,6 +1003,7 @@ IncrementalPipeline::Status IncrementalPipeline::Reconstruct(
       }
 
       case Status::UNKNOWN_SENSOR_FROM_RIG: {
+        progress_->ClearForLog();
         LOG(ERROR)
             << "Discarding reconstruction due to unknown sensor_from_rig "
                "poses. Either explicitly define the poses by configuring the "
@@ -672,7 +1019,8 @@ IncrementalPipeline::Status IncrementalPipeline::Reconstruct(
       }
 
       case Status::BAD_INITIAL_PAIR: {
-        LOG(INFO) << "Discarding reconstruction due to bad initial pair";
+        progress_->SetStage("Discarding reconstruction: bad initial pair");
+        progress_->ClearBoundedWork();
         mapper.EndReconstruction(/*discard=*/true);
         reconstruction_manager_->Delete(reconstruction_idx);
         // If an initial pair was found but it was bad, we discard and attempt
@@ -681,7 +1029,8 @@ IncrementalPipeline::Status IncrementalPipeline::Reconstruct(
       }
 
       case Status::NO_INITIAL_PAIR: {
-        LOG(INFO) << "Discarding reconstruction due to no initial pair";
+        progress_->SetStage("Discarding reconstruction: no initial pair");
+        progress_->ClearBoundedWork();
         mapper.EndReconstruction(/*discard=*/true);
         reconstruction_manager_->Delete(reconstruction_idx);
         // If no pair could be found, we can exit the trial loop, because
@@ -702,12 +1051,14 @@ IncrementalPipeline::Status IncrementalPipeline::Reconstruct(
         if ((options_->multiple_models && reconstruction_manager_->Size() > 1 &&
              num_reg_images < static_cast<size_t>(options_->min_model_size)) ||
             num_reg_images == 0) {
-          LOG(WARNING) << "Discarding reconstruction due to insufficient size";
+          progress_->SetStage("Discarding reconstruction: insufficient size");
+          progress_->ClearBoundedWork();
           mapper.EndReconstruction(/*discard=*/true);
           reconstruction_manager_->Delete(reconstruction_idx);
         } else {
           reconstruction->UpdatePoint3DErrors();
-          LOG(INFO) << "Keeping successful reconstruction";
+          progress_->SetStage("Keeping successful reconstruction");
+          progress_->ClearBoundedWork();
           mapper.EndReconstruction(/*discard=*/false);
           AlignReconstructionToOrigRigScales(database_cache_->Rigs(),
                                              reconstruction.get());
@@ -784,6 +1135,7 @@ void IncrementalPipeline::RegisterCallbacks() {
 bool IncrementalPipeline::CheckReachedMaxRuntime() const {
   if (options_->max_runtime_seconds > 0 &&
       total_run_timer_->ElapsedSeconds() > options_->max_runtime_seconds) {
+    progress_->ClearForLog();
     LOG(INFO) << "Reached maximum runtime of " << options_->max_runtime_seconds
               << " seconds.";
     return true;

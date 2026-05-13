@@ -1087,8 +1087,8 @@ bool IncrementalMapper::AdjustGlobalBundle(
   // After filtering, the reconstruction may have fewer than 2 images,
   // in which case global bundle adjustment is not possible.
   if (ba_config.NumImages() < 2) {
-    LOG(WARNING) << "At least two images must be registered for global "
-                    "bundle-adjustment";
+    VLOG(1) << "At least two images must be registered for global "
+               "bundle-adjustment";
     return false;
   }
 

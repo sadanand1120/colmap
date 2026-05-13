@@ -38,11 +38,50 @@
 #include "colmap/util/misc.h"
 #include "colmap/util/threading.h"
 
+#include <cstdio>
 #include <iomanip>
+
+#ifndef _WIN32
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 namespace colmap {
 
 namespace {
+
+class ScopedStderrSilencer {
+ public:
+  explicit ScopedStderrSilencer(const bool enabled) {
+#ifndef _WIN32
+    if (!enabled) {
+      return;
+    }
+    std::fflush(stderr);
+    stderr_fd_ = dup(STDERR_FILENO);
+    const int null_fd = open("/dev/null", O_WRONLY);
+    if (stderr_fd_ >= 0 && null_fd >= 0) {
+      dup2(null_fd, STDERR_FILENO);
+    }
+    if (null_fd >= 0) {
+      close(null_fd);
+    }
+#endif
+  }
+
+  ~ScopedStderrSilencer() {
+#ifndef _WIN32
+    if (stderr_fd_ >= 0) {
+      std::fflush(stderr);
+      dup2(stderr_fd_, STDERR_FILENO);
+      close(stderr_fd_);
+    }
+#endif
+  }
+
+ private:
+  int stderr_fd_ = -1;
+};
 
 BundleAdjustmentTerminationType CeresTerminationTypeToTerminationType(
     ceres::TerminationType ceres_type) {
@@ -561,7 +600,11 @@ ceres::Solver::Summary SolveWithGpuFallback(
       options.ceres->CreateSolverOptions(config, *problem);
 
   ceres::Solver::Summary ceres_summary;
-  ceres::Solve(solver_options, problem, &ceres_summary);
+  {
+    ScopedStderrSilencer silence_stderr(solver_options.logging_type ==
+                                        ceres::LoggingType::SILENT);
+    ceres::Solve(solver_options, problem, &ceres_summary);
+  }
 
   if (ceres_summary.termination_type == ceres::FAILURE &&
       options.ceres->use_gpu) {
@@ -576,7 +619,11 @@ ceres::Solver::Summary SolveWithGpuFallback(
       cpu_options->use_gpu = false;
       const ceres::Solver::Options cpu_solver_options =
           cpu_options->CreateSolverOptions(config, *problem);
-      ceres::Solve(cpu_solver_options, problem, &ceres_summary);
+      {
+        ScopedStderrSilencer silence_stderr(cpu_solver_options.logging_type ==
+                                            ceres::LoggingType::SILENT);
+        ceres::Solve(cpu_solver_options, problem, &ceres_summary);
+      }
     }
   }
 
