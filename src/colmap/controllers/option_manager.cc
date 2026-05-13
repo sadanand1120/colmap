@@ -442,8 +442,6 @@ void OptionManager::AddSpatialPairingOptions() {
                    &spatial_pairing->min_num_neighbors);
   AddDefaultOption("SpatialMatching.max_distance",
                    &spatial_pairing->max_distance);
-  AddDefaultOption("SpatialMatching.num_threads",
-                   &spatial_pairing->num_threads);
 }
 
 void OptionManager::AddTransitivePairingOptions() {
@@ -505,8 +503,6 @@ void OptionManager::AddBundleAdjustmentOptions() {
   AddDefaultOption(
       "BundleAdjustmentCeres.max_linear_solver_iterations",
       &bundle_adjustment->ceres->solver_options.max_linear_solver_iterations);
-  AddDefaultOption("BundleAdjustmentCeres.num_threads",
-                   &bundle_adjustment->ceres->solver_options.num_threads);
   AddDefaultOption(
       "BundleAdjustmentCeres.function_tolerance",
       &bundle_adjustment->ceres->solver_options.function_tolerance);
