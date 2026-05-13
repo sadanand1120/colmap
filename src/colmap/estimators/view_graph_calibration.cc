@@ -105,7 +105,7 @@ class ViewGraphCalibrationProgress {
                       const size_t current,
                       const size_t total) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (total <= 1) {
+    if (total == 0) {
       has_bounded_work_ = false;
       RenderLocked();
       return;
@@ -461,6 +461,10 @@ void ReestimateRelativePoses(
   std::mutex database_mutex;
   std::atomic<size_t> num_processed_pairs{0};
   ThreadPool thread_pool(options.solver_options.num_threads);
+  ReportProgress(options.progress_callback,
+                 "Re-estimating relative poses",
+                 0,
+                 pairs.size());
 
   for (size_t i = 0; i < pairs.size(); ++i) {
     thread_pool.AddTask([&, i]() {
