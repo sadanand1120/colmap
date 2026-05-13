@@ -145,6 +145,15 @@ std::vector<image_t> IncrementalMapper::FindNextImages(const Options& options,
       /*structure_less=*/structure_less);
 }
 
+size_t IncrementalMapper::NumRegTrials(const image_t image_id,
+                                       const bool structure_less) const {
+  const auto& num_reg_trials = structure_less
+                                   ? reg_stats_.num_structure_less_reg_trials
+                                   : reg_stats_.num_reg_trials;
+  const auto it = num_reg_trials.find(image_id);
+  return it == num_reg_trials.end() ? 0 : it->second;
+}
+
 void IncrementalMapper::RegisterInitialImagePair(
     const Options& options,
     const image_t image_id1,

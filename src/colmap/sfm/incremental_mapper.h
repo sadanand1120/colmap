@@ -205,6 +205,10 @@ class IncrementalMapper {
   std::vector<image_t> FindNextImages(const Options& options,
                                       bool structure_less = false);
 
+  // Number of trials already used for registering image in the current
+  // reconstruction.
+  size_t NumRegTrials(image_t image_id, bool structure_less = false) const;
+
   // Attempt to seed the reconstruction from an image pair.
   void RegisterInitialImagePair(const Options& options,
                                 image_t image_id1,

@@ -986,17 +986,27 @@ IncrementalPipeline::Status IncrementalPipeline::ReconstructSubModel(
 
       for (size_t reg_trial = 0; reg_trial < next_images.size(); ++reg_trial) {
         next_image_id = next_images[reg_trial];
+        const size_t max_reg_trials =
+            static_cast<size_t>(mapper_options.max_reg_trials);
+        const size_t image_reg_trial =
+            std::min(mapper.NumRegTrials(next_image_id, structure_less) + 1,
+                     max_reg_trials);
         std::string candidate_detail = StringPrintf(
-            "%s: registering image #%d (%d/%d visible points)",
+            "%s: trial %zu/%zu, registering image #%d (%d/%d visible points)",
             candidate_label.c_str(),
+            image_reg_trial,
+            max_reg_trials,
             next_image_id,
             mapper.ObservationManager().NumVisiblePoints3D(next_image_id),
             mapper.ObservationManager().NumObservations(next_image_id));
 
         if (structure_less) {
           candidate_detail = StringPrintf(
-              "%s: registering image #%d (%d/%d correspondences)",
+              "%s: trial %zu/%zu, registering image #%d (%d/%d "
+              "correspondences)",
               candidate_label.c_str(),
+              image_reg_trial,
+              max_reg_trials,
               next_image_id,
               mapper.ObservationManager().NumVisibleCorrespondences(
                   next_image_id),
@@ -1022,8 +1032,10 @@ IncrementalPipeline::Status IncrementalPipeline::ReconstructSubModel(
         } else {
           progress_->SetLoopBoundedWork(
               kMapperLoopStageImageRegistration,
-              StringPrintf("%s: image #%d failed registration",
+              StringPrintf("%s: trial %zu/%zu failed for image #%d",
                            candidate_label.c_str(),
+                           image_reg_trial,
+                           max_reg_trials,
                            next_image_id),
               reg_trial + 1,
               next_images.size(),
