@@ -548,8 +548,8 @@ class CovariantSiftCPUFeatureExtractor : public FeatureExtractor {
 };
 
 #if defined(COLMAP_GPU_ENABLED)
-// Mutexes that ensure that only one thread extracts/matches on the same GPU
-// at the same time, since SiftGPU internally uses static variables.
+// Mutexes for OpenGL SIFT extraction to protect static variables in SiftGPU.
+// CUDA extraction has its own context per worker and can run concurrently.
 static std::map<int, std::unique_ptr<std::mutex>> sift_gpu_mutexes_;
 
 class SiftGPUFeatureExtractor : public FeatureExtractor {
@@ -573,6 +573,7 @@ class SiftGPUFeatureExtractor : public FeatureExtractor {
     THROW_CHECK_EQ(gpu_indices.size(), 1) << "SiftGPU can only run on one GPU";
 
     std::vector<std::string> sift_gpu_args;
+    bool use_cuda = false;
 
     sift_gpu_args.push_back("./sift_gpu");
 
@@ -585,6 +586,7 @@ class SiftGPUFeatureExtractor : public FeatureExtractor {
     if (gpu_indices[0] >= 0) {
       sift_gpu_args.push_back("-cuda");
       sift_gpu_args.push_back(std::to_string(gpu_indices[0]));
+      use_cuda = true;
     }
 #endif  // COLMAP_CUDA_ENABLED
 
@@ -659,7 +661,9 @@ class SiftGPUFeatureExtractor : public FeatureExtractor {
                                     sift_gpu_args_cstr.data());
 
     extractor->sift_gpu_.gpu_index = gpu_indices[0];
-    if (sift_gpu_mutexes_.count(gpu_indices[0]) == 0) {
+    extractor->use_opengl_mutex_ = !use_cuda;
+    if (extractor->use_opengl_mutex_ &&
+        sift_gpu_mutexes_.count(gpu_indices[0]) == 0) {
       sift_gpu_mutexes_.emplace(gpu_indices[0], std::make_unique<std::mutex>());
     }
 
@@ -685,7 +689,11 @@ class SiftGPUFeatureExtractor : public FeatureExtractor {
     THROW_CHECK_EQ(options_.EffMaxImageSize() * compensation_factor,
                    sift_gpu_.GetMaxDimension());
 
-    std::lock_guard<std::mutex> lock(*sift_gpu_mutexes_[sift_gpu_.gpu_index]);
+    std::unique_lock<std::mutex> lock;
+    if (use_opengl_mutex_) {
+      lock = std::unique_lock<std::mutex>(
+          *sift_gpu_mutexes_.at(sift_gpu_.gpu_index));
+    }
 
     // Note, that this produces slightly different results than using SiftGPU
     // directly for RGB->GRAY conversion, since it uses different weights.
@@ -739,6 +747,7 @@ class SiftGPUFeatureExtractor : public FeatureExtractor {
  private:
   const FeatureExtractionOptions options_;
   SiftGPU sift_gpu_;
+  bool use_opengl_mutex_ = true;
   std::vector<SiftKeypoint> keypoints_buffer_;
 };
 #endif  // COLMAP_GPU_ENABLED

@@ -112,6 +112,9 @@ class AutomaticReconstructionController : public Thread {
     // The number of threads to use in all stages.
     int num_threads = -1;
 
+    // Number of GPU worker threads to launch per selected GPU where supported.
+    int num_gpu_threads_per_gpu = 1;
+
     // The random seed to use in all stages.
     int random_seed = -1;
 

@@ -263,6 +263,7 @@ ceres::Solver::Options CeresBundleAdjustmentOptions::CreateSolverOptions(
 
 bool CeresBundleAdjustmentOptions::Check() const {
   CHECK_OPTION_GE(loss_function_scale, 0);
+  CHECK_OPTION_GE(solver_options.num_threads, -1);
   CHECK_OPTION_LT(max_num_images_direct_dense_cpu_solver,
                   max_num_images_direct_sparse_cpu_solver);
   CHECK_OPTION_LT(max_num_images_direct_dense_gpu_solver,

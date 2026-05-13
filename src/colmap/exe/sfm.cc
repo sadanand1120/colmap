@@ -78,6 +78,69 @@ void UpdateDatabasePosePriorsCovariance(
   }
 }
 
+struct ParallelismOverrides {
+  int num_cpu_threads = -1;
+  int num_cpu_threads_dash = -1;
+  int num_gpu_threads_per_gpu = -1;
+  int num_gpu_threads_per_gpu_dash = -1;
+};
+
+void AddParallelismOverrides(OptionManager& options,
+                             ParallelismOverrides* overrides,
+                             const bool add_gpu_options) {
+  options.AddDefaultOption("num_cpu_threads", &overrides->num_cpu_threads);
+  options.AddDefaultOption("num-cpu-threads",
+                           &overrides->num_cpu_threads_dash);
+  if (add_gpu_options) {
+    options.AddDefaultOption("num_gpu_threads_per_gpu",
+                             &overrides->num_gpu_threads_per_gpu);
+    options.AddDefaultOption("num-gpu-threads-per-gpu",
+                             &overrides->num_gpu_threads_per_gpu_dash);
+  }
+}
+
+bool ResolvePositiveOverride(const char* name,
+                             const int underscore_value,
+                             const int dash_value,
+                             int* value) {
+  *value = dash_value != -1 ? dash_value : underscore_value;
+  if (*value != -1 && *value < 1) {
+    LOG(ERROR) << name << " must be positive.";
+    return false;
+  }
+  return true;
+}
+
+bool ApplyCpuThreadOverride(const ParallelismOverrides& overrides,
+                            int* num_threads) {
+  int num_cpu_threads = -1;
+  if (!ResolvePositiveOverride("num_cpu_threads",
+                               overrides.num_cpu_threads,
+                               overrides.num_cpu_threads_dash,
+                               &num_cpu_threads)) {
+    return false;
+  }
+  if (num_cpu_threads > 0) {
+    *num_threads = num_cpu_threads;
+  }
+  return true;
+}
+
+bool ApplyGpuThreadOverride(const ParallelismOverrides& overrides,
+                            int* num_gpu_threads_per_gpu) {
+  int value = -1;
+  if (!ResolvePositiveOverride("num_gpu_threads_per_gpu",
+                               overrides.num_gpu_threads_per_gpu,
+                               overrides.num_gpu_threads_per_gpu_dash,
+                               &value)) {
+    return false;
+  }
+  if (value > 0) {
+    *num_gpu_threads_per_gpu = value;
+  }
+  return true;
+}
+
 }  // namespace
 
 int RunAutomaticReconstructor(int argc, char** argv) {
@@ -88,6 +151,7 @@ int RunAutomaticReconstructor(int argc, char** argv) {
   std::string feature = "sift";
   std::string mapper = "incremental";
   std::string mesher = "poisson";
+  ParallelismOverrides parallelism;
 
   OptionManager options;
   options.AddRequiredOption("workspace_path",
@@ -117,10 +181,17 @@ int RunAutomaticReconstructor(int argc, char** argv) {
       "mapper", &mapper, "{incremental, hierarchical, global}");
   options.AddDefaultOption("mesher", &mesher, "{poisson, delaunay}");
   options.AddDefaultOption("num_threads", &reconstruction_options.num_threads);
+  AddParallelismOverrides(options, &parallelism, /*add_gpu_options=*/true);
   options.AddDefaultOption("random_seed", &reconstruction_options.random_seed);
   options.AddDefaultOption("use_gpu", &reconstruction_options.use_gpu);
   options.AddDefaultOption("gpu_index", &reconstruction_options.gpu_index);
   if (!options.Parse(argc, argv)) {
+    return EXIT_FAILURE;
+  }
+  if (!ApplyCpuThreadOverride(parallelism,
+                              &reconstruction_options.num_threads) ||
+      !ApplyGpuThreadOverride(
+          parallelism, &reconstruction_options.num_gpu_threads_per_gpu)) {
     return EXIT_FAILURE;
   }
 
@@ -168,12 +239,20 @@ int RunAutomaticReconstructor(int argc, char** argv) {
 int RunBundleAdjuster(int argc, char** argv) {
   std::filesystem::path input_path;
   std::filesystem::path output_path;
+  ParallelismOverrides parallelism;
 
   OptionManager options;
   options.AddRequiredOption("input_path", &input_path);
   options.AddRequiredOption("output_path", &output_path);
   options.AddBundleAdjustmentOptions();
+  AddParallelismOverrides(options, &parallelism, /*add_gpu_options=*/false);
   if (!options.Parse(argc, argv)) {
+    return EXIT_FAILURE;
+  }
+  if (options.bundle_adjustment->ceres &&
+      !ApplyCpuThreadOverride(
+          parallelism,
+          &options.bundle_adjustment->ceres->solver_options.num_threads)) {
     return EXIT_FAILURE;
   }
 
@@ -317,6 +396,7 @@ bool RunIncrementalMapperImpl(
 int RunMapper(int argc, char** argv) {
   std::filesystem::path input_path;
   std::filesystem::path output_path;
+  ParallelismOverrides parallelism;
 
   OptionManager options;
   options.AddDatabaseOptions();
@@ -324,7 +404,11 @@ int RunMapper(int argc, char** argv) {
   options.AddDefaultOption("input_path", &input_path);
   options.AddRequiredOption("output_path", &output_path);
   options.AddMapperOptions();
+  AddParallelismOverrides(options, &parallelism, /*add_gpu_options=*/false);
   if (!options.Parse(argc, argv)) {
+    return EXIT_FAILURE;
+  }
+  if (!ApplyCpuThreadOverride(parallelism, &options.mapper->num_threads)) {
     return EXIT_FAILURE;
   }
 
@@ -385,13 +469,19 @@ bool RunGlobalMapperImpl(
 
 int RunGlobalMapper(int argc, char** argv) {
   std::filesystem::path output_path;
+  ParallelismOverrides parallelism;
 
   OptionManager options;
   options.AddDatabaseOptions();
   options.AddImageOptions();
   options.AddRequiredOption("output_path", &output_path);
   options.AddGlobalMapperOptions();
+  AddParallelismOverrides(options, &parallelism, /*add_gpu_options=*/false);
   if (!options.Parse(argc, argv)) {
+    return EXIT_FAILURE;
+  }
+  if (!ApplyCpuThreadOverride(parallelism,
+                              &options.global_mapper->num_threads)) {
     return EXIT_FAILURE;
   }
 
@@ -416,12 +506,14 @@ int RunGlobalMapper(int argc, char** argv) {
 int RunHierarchicalMapper(int argc, char** argv) {
   HierarchicalPipeline::Options mapper_options;
   std::filesystem::path output_path;
+  ParallelismOverrides parallelism;
 
   OptionManager options;
   options.AddDatabaseOptions();
   options.AddRequiredOption("image_path", &mapper_options.image_path);
   options.AddRequiredOption("output_path", &output_path);
   options.AddDefaultOption("num_threads", &mapper_options.num_threads);
+  AddParallelismOverrides(options, &parallelism, /*add_gpu_options=*/false);
   options.AddDefaultOption("num_workers", &mapper_options.num_workers);
   options.AddDefaultOption("image_overlap",
                            &mapper_options.clustering_options.image_overlap);
@@ -432,6 +524,9 @@ int RunHierarchicalMapper(int argc, char** argv) {
   if (!options.Parse(argc, argv)) {
     return EXIT_FAILURE;
   }
+  if (!ApplyCpuThreadOverride(parallelism, &mapper_options.num_threads)) {
+    return EXIT_FAILURE;
+  }
 
   if (!ExistsDir(output_path)) {
     LOG(ERROR) << "`output_path` is not a directory.";
@@ -439,6 +534,7 @@ int RunHierarchicalMapper(int argc, char** argv) {
   }
 
   mapper_options.incremental_options = *options.mapper;
+  mapper_options.incremental_options.num_threads = mapper_options.num_threads;
   auto reconstruction_manager = std::make_shared<ReconstructionManager>();
   HierarchicalPipeline hierarchical_mapper(
       mapper_options,
@@ -460,6 +556,7 @@ int RunHierarchicalMapper(int argc, char** argv) {
 int RunPosePriorMapper(int argc, char** argv) {
   std::filesystem::path input_path;
   std::filesystem::path output_path;
+  ParallelismOverrides parallelism;
 
   bool overwrite_priors_covariance = false;
   double prior_position_std_x = 1.;
@@ -472,6 +569,7 @@ int RunPosePriorMapper(int argc, char** argv) {
   options.AddDefaultOption("input_path", &input_path);
   options.AddRequiredOption("output_path", &output_path);
   options.AddMapperOptions();
+  AddParallelismOverrides(options, &parallelism, /*add_gpu_options=*/false);
 
   options.mapper->use_prior_position = true;
 
@@ -488,6 +586,9 @@ int RunPosePriorMapper(int argc, char** argv) {
   options.AddDefaultOption("prior_position_loss_scale",
                            &options.mapper->prior_position_loss_scale);
   if (!options.Parse(argc, argv)) {
+    return EXIT_FAILURE;
+  }
+  if (!ApplyCpuThreadOverride(parallelism, &options.mapper->num_threads)) {
     return EXIT_FAILURE;
   }
 
@@ -570,6 +671,7 @@ int RunPointTriangulator(int argc, char** argv) {
   std::filesystem::path output_path;
   bool clear_points = true;
   bool refine_intrinsics = false;
+  ParallelismOverrides parallelism;
 
   OptionManager options;
   options.AddDatabaseOptions();
@@ -587,7 +689,11 @@ int RunPointTriangulator(int argc, char** argv) {
                            "Whether to refine the intrinsics of the cameras "
                            "(fixing the principal point)");
   options.AddMapperOptions();
+  AddParallelismOverrides(options, &parallelism, /*add_gpu_options=*/false);
   if (!options.Parse(argc, argv)) {
+    return EXIT_FAILURE;
+  }
+  if (!ApplyCpuThreadOverride(parallelism, &options.mapper->num_threads)) {
     return EXIT_FAILURE;
   }
 
@@ -652,6 +758,7 @@ int RunRotationAverager(int argc, char** argv) {
   std::filesystem::path image_list_path;
 
   RotationAveragingPipelineOptions controller_options;
+  ParallelismOverrides parallelism;
 
   OptionManager options;
   options.AddDatabaseOptions();
@@ -662,6 +769,7 @@ int RunRotationAverager(int argc, char** argv) {
   options.AddDefaultOption("ignore_watermarks",
                            &controller_options.ignore_watermarks);
   options.AddDefaultOption("num_threads", &controller_options.num_threads);
+  AddParallelismOverrides(options, &parallelism, /*add_gpu_options=*/false);
   options.AddDefaultOption("random_seed", &controller_options.random_seed);
   options.AddDefaultOption("use_gravity",
                            &controller_options.rotation_estimation.use_gravity);
@@ -671,6 +779,10 @@ int RunRotationAverager(int argc, char** argv) {
                            &controller_options.refine_gravity);
   options.AddGravityRefinerOptions();
   if (!options.Parse(argc, argv)) {
+    return EXIT_FAILURE;
+  }
+  if (!ApplyCpuThreadOverride(parallelism,
+                              &controller_options.num_threads)) {
     return EXIT_FAILURE;
   }
 
@@ -705,9 +817,11 @@ int RunRotationAverager(int argc, char** argv) {
 
 int RunViewGraphCalibrator(int argc, char** argv) {
   ViewGraphCalibrationOptions calibration_options;
+  ParallelismOverrides parallelism;
 
   OptionManager options;
   options.AddDatabaseOptions();
+  AddParallelismOverrides(options, &parallelism, /*add_gpu_options=*/false);
   options.AddDefaultOption(
       "cross_validate_prior_focal_lengths",
       &calibration_options.cross_validate_prior_focal_lengths,
@@ -739,6 +853,10 @@ int RunViewGraphCalibrator(int argc, char** argv) {
       &calibration_options.relpose_min_inlier_ratio,
       "Minimum inlier ratio for relative pose re-estimation");
   if (!options.Parse(argc, argv)) {
+    return EXIT_FAILURE;
+  }
+  if (!ApplyCpuThreadOverride(
+          parallelism, &calibration_options.solver_options.num_threads)) {
     return EXIT_FAILURE;
   }
 

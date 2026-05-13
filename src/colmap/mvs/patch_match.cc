@@ -380,6 +380,15 @@ void PatchMatchController::ReadGpuIndices() {
     gpu_indices_.resize(num_cuda_devices);
     std::iota(gpu_indices_.begin(), gpu_indices_.end(), 0);
   }
+  std::vector<int> worker_gpu_indices;
+  worker_gpu_indices.reserve(gpu_indices_.size() *
+                             options_.num_gpu_threads_per_gpu);
+  for (const int gpu_index : gpu_indices_) {
+    for (int i = 0; i < options_.num_gpu_threads_per_gpu; ++i) {
+      worker_gpu_indices.push_back(gpu_index);
+    }
+  }
+  gpu_indices_ = std::move(worker_gpu_indices);
 }
 
 void PatchMatchController::ProcessProblem(const PatchMatchOptions& options,

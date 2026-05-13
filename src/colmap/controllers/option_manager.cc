@@ -219,6 +219,8 @@ void OptionManager::AddFeatureExtractionOptions() {
                        FeatureExtractorTypeFromString);
   AddDefaultOption("FeatureExtraction.num_threads",
                    &feature_extraction->num_threads);
+  AddDefaultOption("FeatureExtraction.num_gpu_threads_per_gpu",
+                   &feature_extraction->num_gpu_threads_per_gpu);
   AddDefaultOption("FeatureExtraction.use_gpu", &feature_extraction->use_gpu);
   AddDefaultOption("FeatureExtraction.gpu_index",
                    &feature_extraction->gpu_index);
@@ -274,6 +276,8 @@ void OptionManager::AddFeatureMatchingOptions() {
                        FeatureMatcherTypeFromString);
   AddDefaultOption("FeatureMatching.num_threads",
                    &feature_matching->num_threads);
+  AddDefaultOption("FeatureMatching.num_gpu_threads_per_gpu",
+                   &feature_matching->num_gpu_threads_per_gpu);
   AddDefaultOption("FeatureMatching.use_gpu", &feature_matching->use_gpu);
   AddDefaultOption("FeatureMatching.gpu_index", &feature_matching->gpu_index);
   AddDefaultOption("FeatureMatching.guided_matching",
@@ -438,6 +442,8 @@ void OptionManager::AddSpatialPairingOptions() {
                    &spatial_pairing->min_num_neighbors);
   AddDefaultOption("SpatialMatching.max_distance",
                    &spatial_pairing->max_distance);
+  AddDefaultOption("SpatialMatching.num_threads",
+                   &spatial_pairing->num_threads);
 }
 
 void OptionManager::AddTransitivePairingOptions() {
@@ -499,6 +505,8 @@ void OptionManager::AddBundleAdjustmentOptions() {
   AddDefaultOption(
       "BundleAdjustmentCeres.max_linear_solver_iterations",
       &bundle_adjustment->ceres->solver_options.max_linear_solver_iterations);
+  AddDefaultOption("BundleAdjustmentCeres.num_threads",
+                   &bundle_adjustment->ceres->solver_options.num_threads);
   AddDefaultOption(
       "BundleAdjustmentCeres.function_tolerance",
       &bundle_adjustment->ceres->solver_options.function_tolerance);
@@ -866,6 +874,8 @@ void OptionManager::AddPatchMatchStereoOptions() {
                    &patch_match_stereo->write_consistency_graph);
   AddDefaultOption("PatchMatchStereo.num_threads",
                    &patch_match_stereo->num_threads);
+  AddDefaultOption("PatchMatchStereo.num_gpu_threads_per_gpu",
+                   &patch_match_stereo->num_gpu_threads_per_gpu);
 }
 
 void OptionManager::AddStereoFusionOptions() {

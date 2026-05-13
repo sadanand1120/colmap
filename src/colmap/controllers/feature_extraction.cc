@@ -435,16 +435,21 @@ class FeatureExtractorController : public Thread {
 #endif  // COLMAP_CUDA_ENABLED
 
       // Prevent nested threading, as we multi-thread at the controller level.
+      const int num_gpu_workers =
+          static_cast<int>(gpu_indices.size()) *
+          worker_extraction_options.num_gpu_threads_per_gpu;
       worker_extraction_options.num_threads =
-          std::max(num_threads / static_cast<int>(gpu_indices.size()), 1);
+          std::max(num_threads / num_gpu_workers, 1);
 
       for (const int gpu_index : gpu_indices) {
         worker_extraction_options.gpu_index = std::to_string(gpu_index);
-        extractors_.emplace_back(
-            std::make_unique<FeatureExtractorThread>(worker_extraction_options,
-                                                     camera_mask,
-                                                     extractor_queue_.get(),
-                                                     writer_queue_.get()));
+        for (int i = 0; i < extraction_options_.num_gpu_threads_per_gpu; ++i) {
+          extractors_.emplace_back(std::make_unique<FeatureExtractorThread>(
+              worker_extraction_options,
+              camera_mask,
+              extractor_queue_.get(),
+              writer_queue_.get()));
+        }
       }
     } else {
       const static FeatureExtractionOptions kDefaultExtractionOptions;

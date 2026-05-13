@@ -107,10 +107,16 @@ AutomaticReconstructionController::AutomaticReconstructionController(
   }
   option_manager_.feature_extraction->num_threads = options_.num_threads;
   option_manager_.feature_matching->num_threads = options_.num_threads;
+  option_manager_.feature_extraction->num_gpu_threads_per_gpu =
+      options_.num_gpu_threads_per_gpu;
+  option_manager_.feature_matching->num_gpu_threads_per_gpu =
+      options_.num_gpu_threads_per_gpu;
   option_manager_.sequential_pairing->num_threads = options_.num_threads;
   option_manager_.vocab_tree_pairing->num_threads = options_.num_threads;
   option_manager_.mapper->num_threads = options_.num_threads;
   option_manager_.patch_match_stereo->num_threads = options_.num_threads;
+  option_manager_.patch_match_stereo->num_gpu_threads_per_gpu =
+      options_.num_gpu_threads_per_gpu;
   option_manager_.poisson_meshing->num_threads = options_.num_threads;
   option_manager_.delaunay_meshing->num_threads = options_.num_threads;
 
