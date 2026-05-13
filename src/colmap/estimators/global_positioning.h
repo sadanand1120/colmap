@@ -3,6 +3,8 @@
 #include "colmap/scene/pose_graph.h"
 #include "colmap/scene/reconstruction.h"
 
+#include <functional>
+#include <memory>
 #include <string>
 
 #include <ceres/ceres.h>
@@ -10,6 +12,9 @@
 namespace colmap {
 
 struct GlobalPositionerOptions {
+  using ProgressCallback =
+      std::function<void(const std::string&, size_t, size_t)>;
+
   // Whether to initialize the camera and track positions randomly.
   bool generate_random_positions = true;
   bool generate_random_points = true;
@@ -43,6 +48,14 @@ struct GlobalPositionerOptions {
 
   // The options for the solver
   ceres::Solver::Options solver_options;
+
+  // Optional callback factory for monotonic solver progress reporting.
+  std::function<std::unique_ptr<ceres::IterationCallback>(
+      const ceres::Solver::Options&)>
+      progress_callback_factory;
+
+  // Optional callback for monotonic setup progress reporting.
+  ProgressCallback progress_callback;
 
   GlobalPositionerOptions() {
     solver_options.num_threads = -1;

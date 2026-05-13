@@ -108,6 +108,11 @@ ObservationManager::ObservationManager(
   }
 }
 
+void ObservationManager::SetProgressCallback(
+    ProgressCallback progress_callback) {
+  progress_callback_ = std::move(progress_callback);
+}
+
 void ObservationManager::IncrementCorrespondenceHasPoint3D(
     const image_t image_id, const point2D_t point2D_idx) {
   const Image& image = reconstruction_.Image(image_id);
@@ -328,7 +333,9 @@ size_t ObservationManager::FilterPoints3DWithShortTracks(
   size_t num_filtered_observations = 0;
   const std::unordered_set<point3D_t> point3D_ids =
       reconstruction_.Point3DIds();
+  size_t point3D_idx = 0;
   for (const point3D_t point3D_id : point3D_ids) {
+    ReportProgress("Filtering short tracks", ++point3D_idx, point3D_ids.size());
     const struct Point3D& point3D = reconstruction_.Point3D(point3D_id);
     if (point3D.track.Length() < min_track_length) {
       num_filtered_observations += point3D.track.Length();
@@ -340,12 +347,24 @@ size_t ObservationManager::FilterPoints3DWithShortTracks(
 
 size_t ObservationManager::FilterObservationsWithNegativeDepth() {
   size_t num_filtered = 0;
+  size_t num_points2D = 0;
+  if (progress_callback_) {
+    for (const frame_t frame_id : reconstruction_.RegFrameIds()) {
+      for (const data_t& data_id : reconstruction_.Frame(frame_id).ImageIds()) {
+        num_points2D += reconstruction_.Image(data_id.id).NumPoints2D();
+      }
+    }
+  }
+  size_t point2D_idx_total = 0;
   for (const frame_t frame_id : reconstruction_.RegFrameIds()) {
     for (const data_t& data_id : reconstruction_.Frame(frame_id).ImageIds()) {
       const Image& image = reconstruction_.Image(data_id.id);
       const Eigen::Matrix3x4d cam_from_world = image.CamFromWorld().ToMatrix();
       for (point2D_t point2D_idx = 0; point2D_idx < image.NumPoints2D();
            ++point2D_idx) {
+        ReportProgress("Filtering negative depth observations",
+                       ++point2D_idx_total,
+                       num_points2D);
         const Point2D& point2D = image.Point2D(point2D_idx);
         if (point2D.HasPoint3D()) {
           const struct Point3D& point3D =
@@ -373,7 +392,11 @@ size_t ObservationManager::FilterPoints3DWithSmallTriangulationAngle(
   // Cache for image projection centers.
   std::unordered_map<image_t, Eigen::Vector3d> proj_centers;
 
+  size_t point3D_idx = 0;
   for (const auto point3D_id : point3D_ids) {
+    ReportProgress("Filtering small triangulation angles",
+                   ++point3D_idx,
+                   point3D_ids.size());
     if (!reconstruction_.ExistsPoint3D(point3D_id)) {
       continue;
     }
@@ -433,7 +456,10 @@ size_t ObservationManager::FilterPoints3DWithLargeReprojectionError(
   const double max_squared_error = max_error * max_error;
   const double max_angular_error_rad = DegToRad(max_error);
 
+  size_t point3D_idx = 0;
   for (const auto point3D_id : point3D_ids) {
+    ReportProgress(
+        "Filtering reprojection errors", ++point3D_idx, point3D_ids.size());
     if (!reconstruction_.ExistsPoint3D(point3D_id)) {
       continue;
     }
@@ -516,6 +542,14 @@ size_t ObservationManager::FilterPoints3DWithLargeReprojectionError(
   }
 
   return num_filtered_observations;
+}
+
+void ObservationManager::ReportProgress(const std::string& label,
+                                        const size_t current,
+                                        const size_t total) const {
+  if (progress_callback_ && total > 1) {
+    progress_callback_(label, current, total);
+  }
 }
 
 void ObservationManager::RegisterFrame(const frame_t frame_id) {

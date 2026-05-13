@@ -9,7 +9,9 @@
 #include "colmap/sfm/incremental_triangulator.h"
 
 #include <filesystem>
+#include <functional>
 #include <limits>
+#include <string>
 
 namespace colmap {
 
@@ -97,6 +99,9 @@ struct GlobalMapperOptions {
 
 class GlobalMapper {
  public:
+  using ProgressCallback =
+      std::function<void(const std::string&, size_t, size_t)>;
+
   explicit GlobalMapper(std::shared_ptr<const DatabaseCache> database_cache);
 
   // Prepare the mapper for a new reconstruction. This will initialize the
@@ -111,13 +116,15 @@ class GlobalMapper {
   bool RotationAveraging(const RotationEstimatorOptions& options);
 
   // Establish tracks from feature matches.
-  void EstablishTracks(const GlobalMapperOptions& options);
+  void EstablishTracks(const GlobalMapperOptions& options,
+                       ProgressCallback progress_callback = nullptr);
 
   // Estimate global camera positions.
   bool GlobalPositioning(const GlobalPositionerOptions& options,
                          double max_angular_reproj_error_deg,
                          double max_normalized_reproj_error,
-                         double min_tri_angle_deg);
+                         double min_tri_angle_deg,
+                         ProgressCallback progress_callback = nullptr);
 
   // Run iterative bundle adjustment to refine poses and structure.
   bool IterativeBundleAdjustment(const BundleAdjustmentOptions& options,
@@ -125,14 +132,16 @@ class GlobalMapper {
                                  double min_tri_angle_deg,
                                  int num_iterations,
                                  bool skip_fixed_rotation_stage = false,
-                                 bool skip_joint_optimization_stage = false);
+                                 bool skip_joint_optimization_stage = false,
+                                 ProgressCallback progress_callback = nullptr);
 
   // Iteratively retriangulate tracks and refine to improve structure.
   bool IterativeRetriangulateAndRefine(
       const IncrementalTriangulator::Options& options,
       const BundleAdjustmentOptions& ba_options,
       double max_normalized_reproj_error,
-      double min_tri_angle_deg);
+      double min_tri_angle_deg,
+      ProgressCallback progress_callback = nullptr);
 
   // Getter functions.
   std::shared_ptr<class Reconstruction> Reconstruction() const;
