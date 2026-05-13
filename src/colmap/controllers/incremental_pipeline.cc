@@ -913,6 +913,11 @@ IncrementalPipeline::Status IncrementalPipeline::ReconstructSubModel(
   progress_->SetStage("Starting reconstruction");
   progress_->ClearBoundedWork();
   mapper.BeginReconstruction(reconstruction);
+  mapper.Triangulator().SetProgressCallback([this](const std::string& label,
+                                                   const size_t current,
+                                                   const size_t total) {
+    progress_->SetBoundedWork(label, current, total);
+  });
   for (const frame_t frame_id : reconstruction->RegFrameIds()) {
     progress_->MarkRegisteredFrame(reconstruction->Frame(frame_id));
   }
