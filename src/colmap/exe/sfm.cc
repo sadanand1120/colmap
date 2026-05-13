@@ -738,6 +738,9 @@ int RunViewGraphCalibrator(int argc, char** argv) {
       "relpose_min_inlier_ratio",
       &calibration_options.relpose_min_inlier_ratio,
       "Minimum inlier ratio for relative pose re-estimation");
+  options.AddDefaultOption("num_threads",
+                           &calibration_options.solver_options.num_threads,
+                           "Number of CPU threads");
   if (!options.Parse(argc, argv)) {
     return EXIT_FAILURE;
   }
