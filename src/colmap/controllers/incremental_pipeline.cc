@@ -38,6 +38,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <mutex>
 #include <sstream>
@@ -49,6 +50,14 @@
 #endif
 
 namespace colmap {
+
+constexpr size_t kMapperLoopNumStages = 6;
+constexpr size_t kMapperLoopStageTriangulation = 1;
+constexpr size_t kMapperLoopStageLocalRefinement = 2;
+constexpr size_t kMapperLoopStageGlobalRefinement = 3;
+constexpr size_t kMapperLoopStageColorExtraction = 4;
+constexpr size_t kMapperLoopStageSnapshot = 5;
+constexpr size_t kMapperLoopStageImageRegistration = 6;
 
 class MapperProgress {
  public:
@@ -91,6 +100,10 @@ class MapperProgress {
     RenderLocked();
   }
 
+  void SetLoopStage(const size_t stage_index, std::string stage) {
+    SetStage(FormatLoopStage(stage_index, std::move(stage)));
+  }
+
   void SetBoundedWork(std::string label,
                       const size_t current,
                       const size_t total) {
@@ -110,6 +123,17 @@ class MapperProgress {
     bounded_total_ = total;
     has_bounded_work_ = true;
     RenderLocked(start_new_work || bounded_current_ == bounded_total_);
+  }
+
+  void SetLoopBoundedWork(const size_t stage_index,
+                          std::string label,
+                          const size_t current,
+                          const size_t total) {
+    if (total <= 1) {
+      SetLoopStage(stage_index, std::move(label));
+      return;
+    }
+    SetBoundedWork(std::move(label), current, total);
   }
 
   void ClearBoundedWork() {
@@ -193,12 +217,19 @@ class MapperProgress {
         100.0 * static_cast<double>(current) / static_cast<double>(total));
   }
 
+  static std::string FormatLoopStage(const size_t stage_index,
+                                     const std::string& stage) {
+    return StringPrintf(
+        "(%zu/%zu) %s", stage_index, kMapperLoopNumStages, stage.c_str());
+  }
+
   std::string FormatElapsed() const {
-    const double seconds = timer_.ElapsedSeconds();
-    if (seconds < 60.0) {
-      return StringPrintf("%.1fs", seconds);
-    }
-    return StringPrintf("%.1fm", seconds / 60.0);
+    const auto total_seconds =
+        static_cast<long long>(std::llround(timer_.ElapsedSeconds()));
+    const auto hours = total_seconds / 3600;
+    const auto minutes = (total_seconds % 3600) / 60;
+    const auto seconds = total_seconds % 60;
+    return StringPrintf("%lldh %02lldm %02llds", hours, minutes, seconds);
   }
 
   void HeartbeatLoop() {
@@ -341,10 +372,18 @@ DatabaseCache::Options CreateDatabaseCacheOptions(
 void IterativeGlobalRefinement(MapperProgress* progress,
                                const IncrementalPipelineOptions& options,
                                const IncrementalMapper::Options& mapper_options,
-                               IncrementalMapper& mapper) {
+                               IncrementalMapper& mapper,
+                               const bool loop_stage = true) {
   if (progress != nullptr) {
-    progress->SetStage("Retriangulation and global bundle adjustment");
     progress->ClearBoundedWork();
+    if (loop_stage) {
+      progress->SetLoopStage(
+          kMapperLoopStageGlobalRefinement,
+          "Global refinement: retriangulation and bundle adjustment");
+    } else {
+      progress->SetStage(
+          "Final global refinement: retriangulation and bundle adjustment");
+    }
   }
   mapper.IterativeGlobalRefinement(options.ba_global_max_refinements,
                                    options.ba_global_max_refinement_change,
@@ -833,6 +872,11 @@ IncrementalPipeline::Status IncrementalPipeline::ReconstructSubModel(
     // first, and if that fails, try (less reliable) structure-less
     // registration.
     for (const bool structure_less : structure_less_flags) {
+      progress_->ClearBoundedWork();
+      progress_->SetLoopStage(kMapperLoopStageImageRegistration,
+                              structure_less
+                                  ? "Finding structure-less image candidates"
+                                  : "Finding image candidates");
       const std::vector<image_t> next_images = mapper.FindNextImages(
           mapper_options, /*structure_less=*/structure_less);
       const std::string candidate_label =
@@ -840,23 +884,30 @@ IncrementalPipeline::Status IncrementalPipeline::ReconstructSubModel(
 
       for (size_t reg_trial = 0; reg_trial < next_images.size(); ++reg_trial) {
         next_image_id = next_images[reg_trial];
-        progress_->SetBoundedWork(
-            candidate_label, reg_trial + 1, next_images.size());
+        progress_->SetLoopBoundedWork(kMapperLoopStageImageRegistration,
+                                      candidate_label,
+                                      reg_trial + 1,
+                                      next_images.size());
 
-        progress_->SetStage(StringPrintf(
-            "Registering image #%d (%d/%d visible points)",
-            next_image_id,
-            mapper.ObservationManager().NumVisiblePoints3D(next_image_id),
-            mapper.ObservationManager().NumObservations(next_image_id)));
+        progress_->SetLoopStage(
+            kMapperLoopStageImageRegistration,
+            StringPrintf(
+                "Registering image #%d (%d/%d visible points)",
+                next_image_id,
+                mapper.ObservationManager().NumVisiblePoints3D(next_image_id),
+                mapper.ObservationManager().NumObservations(next_image_id)));
 
         if (structure_less) {
-          progress_->SetStage(StringPrintf(
-              "Registering image #%d with structure-less fallback "
-              "(%d/%d correspondences)",
-              next_image_id,
-              mapper.ObservationManager().NumVisibleCorrespondences(
-                  next_image_id),
-              mapper.ObservationManager().NumCorrespondences(next_image_id)));
+          progress_->SetLoopStage(
+              kMapperLoopStageImageRegistration,
+              StringPrintf(
+                  "Registering image #%d with structure-less fallback "
+                  "(%d/%d correspondences)",
+                  next_image_id,
+                  mapper.ObservationManager().NumVisibleCorrespondences(
+                      next_image_id),
+                  mapper.ObservationManager().NumCorrespondences(
+                      next_image_id)));
           reg_next_success = mapper.RegisterNextStructureLessImage(
               mapper_options, next_image_id);
         } else {
@@ -867,9 +918,11 @@ IncrementalPipeline::Status IncrementalPipeline::ReconstructSubModel(
         if (reg_next_success) {
           break;
         } else {
-          progress_->SetStage(StringPrintf(
-              "Image #%d failed registration; trying next candidate",
-              next_image_id));
+          progress_->SetLoopStage(
+              kMapperLoopStageImageRegistration,
+              StringPrintf("Image #%d failed registration; trying next "
+                           "candidate",
+                           next_image_id));
 
           // If initial model fails to continue for some time,
           // abort and try different initial pair.
@@ -889,17 +942,23 @@ IncrementalPipeline::Status IncrementalPipeline::ReconstructSubModel(
 
     if (reg_next_success) {
       const Image& image = reconstruction->Image(next_image_id);
+      progress_->ClearBoundedWork();
       progress_->MarkRegisteredFrame(*image.FramePtr());
       size_t image_data_idx = 0;
       const size_t num_frame_images = CountFrameImages(*image.FramePtr());
+      progress_->SetLoopStage(
+          kMapperLoopStageTriangulation,
+          StringPrintf("Triangulation after image #%d", next_image_id));
       for (const data_t& data_id : image.FramePtr()->ImageIds()) {
-        progress_->SetBoundedWork("Triangulating registered frame",
-                                  ++image_data_idx,
-                                  num_frame_images);
+        progress_->SetLoopBoundedWork(kMapperLoopStageTriangulation,
+                                      "Triangulating registered frame",
+                                      ++image_data_idx,
+                                      num_frame_images);
         mapper.TriangulateImage(options_->Triangulation(), data_id.id);
       }
       progress_->ClearBoundedWork();
-      progress_->SetStage(
+      progress_->SetLoopStage(
+          kMapperLoopStageLocalRefinement,
           StringPrintf("Local refinement after image #%d", next_image_id));
       mapper.IterativeLocalRefinement(options_->ba_local_max_refinements,
                                       options_->ba_local_max_refinement_change,
@@ -918,9 +977,15 @@ IncrementalPipeline::Status IncrementalPipeline::ReconstructSubModel(
 
       if (options_->extract_colors) {
         image_data_idx = 0;
+        progress_->ClearBoundedWork();
+        progress_->SetLoopStage(
+            kMapperLoopStageColorExtraction,
+            StringPrintf("Color extraction after image #%d", next_image_id));
         for (const data_t& data_id : image.FramePtr()->ImageIds()) {
-          progress_->SetBoundedWork(
-              "Extracting colors", ++image_data_idx, num_frame_images);
+          progress_->SetLoopBoundedWork(kMapperLoopStageColorExtraction,
+                                        "Extracting colors",
+                                        ++image_data_idx,
+                                        num_frame_images);
           ExtractColors(options_->image_path,
                         data_id.id,
                         *reconstruction,
@@ -932,8 +997,9 @@ IncrementalPipeline::Status IncrementalPipeline::ReconstructSubModel(
       if (options_->snapshot_frames_freq > 0 &&
           reconstruction->NumRegFrames() >=
               options_->snapshot_frames_freq + snapshot_prev_num_reg_frames) {
-        progress_->SetStage("Writing reconstruction snapshot");
         progress_->ClearBoundedWork();
+        progress_->SetLoopStage(kMapperLoopStageSnapshot,
+                                "Writing reconstruction snapshot");
         snapshot_prev_num_reg_frames = reconstruction->NumRegFrames();
         WriteSnapshot(*reconstruction, options_->snapshot_path);
       }
@@ -964,8 +1030,11 @@ IncrementalPipeline::Status IncrementalPipeline::ReconstructSubModel(
   if (reconstruction->NumRegFrames() > 0 &&
       reconstruction->NumRegFrames() != ba_prev_num_reg_frames &&
       reconstruction->NumPoints3D() != ba_prev_num_points) {
-    IterativeGlobalRefinement(
-        progress_.get(), *options_, mapper_options, mapper);
+    IterativeGlobalRefinement(progress_.get(),
+                              *options_,
+                              mapper_options,
+                              mapper,
+                              /*loop_stage=*/false);
   }
   return Status::SUCCESS;
 }
