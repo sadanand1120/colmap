@@ -323,6 +323,75 @@ TEST(BaseOptionManager, ParseWithProjectPath) {
   EXPECT_EQ(*options.image_path, *options_write.image_path);
 }
 
+TEST(BaseOptionManager, ParseCommandLineOverridesProjectPath) {
+  const auto test_dir = CreateTestDir();
+  const auto config_path = test_dir / "config.ini";
+  CreateDirIfNotExists(test_dir / "images_config");
+  CreateDirIfNotExists(test_dir / "images_cli");
+
+  BaseOptionManager options_write;
+  options_write.AddDatabaseOptions();
+  options_write.AddImageOptions();
+  bool bool_option_write = true;
+  int int_option_write = 1;
+  double double_option_write = 1.0;
+  std::string string_option_write = "config";
+  options_write.AddDefaultOption("bool_option", &bool_option_write);
+  options_write.AddDefaultOption("int_option", &int_option_write);
+  options_write.AddDefaultOption("double_option", &double_option_write);
+  options_write.AddDefaultOption("string_option", &string_option_write);
+
+  *options_write.database_path = test_dir / "config.db";
+  *options_write.image_path = test_dir / "images_config";
+  options_write.Write(config_path);
+
+  BaseOptionManager options;
+  options.AddDatabaseOptions();
+  options.AddImageOptions();
+  bool bool_option = true;
+  int int_option = 1;
+  double double_option = 1.0;
+  std::string string_option = "config";
+  options.AddDefaultOption("bool_option", &bool_option);
+  options.AddDefaultOption("int_option", &int_option);
+  options.AddDefaultOption("double_option", &double_option);
+  options.AddDefaultOption("string_option", &string_option);
+
+  const auto cli_database_path = test_dir / "cli.db";
+  const auto cli_image_path = test_dir / "images_cli";
+  const std::vector<std::string> args = {
+      "colmap",
+      "--project_path",
+      config_path.string(),
+      "--database_path",
+      cli_database_path.string(),
+      "--image_path",
+      cli_image_path.string(),
+      "--bool_option",
+      "0",
+      "--int_option",
+      "2",
+      "--double_option",
+      "2.5",
+      "--string_option",
+      "cli",
+  };
+
+  std::vector<char*> argv;
+  argv.reserve(args.size());
+  for (auto& arg : args) {
+    argv.push_back(const_cast<char*>(arg.c_str()));
+  }
+
+  EXPECT_TRUE(options.Parse(argv.size(), argv.data()));
+  EXPECT_EQ(*options.database_path, cli_database_path);
+  EXPECT_EQ(*options.image_path, cli_image_path);
+  EXPECT_FALSE(bool_option);
+  EXPECT_EQ(int_option, 2);
+  EXPECT_EQ(double_option, 2.5);
+  EXPECT_EQ(string_option, "cli");
+}
+
 TEST(BaseOptionManager, ParseEmptyArguments) {
   BaseOptionManager options;
 

@@ -239,7 +239,9 @@ bool BaseOptionManager::Parse(const int argc, char** argv) {
   config::variables_map vmap;
 
   try {
-    config::store(config::parse_command_line(argc, argv, *desc_), vmap);
+    const config::parsed_options parsed_options =
+        config::parse_command_line(argc, argv, *desc_);
+    config::store(parsed_options, vmap);
 
     if (vmap.count("help")) {
       PrintHelp();
@@ -249,8 +251,62 @@ bool BaseOptionManager::Parse(const int argc, char** argv) {
 
     if (vmap.count("project_path")) {
       *project_path = vmap["project_path"].as<std::string>();
-      if (!Read(*project_path)) {
+      if (!BaseOptionManager::Read(*project_path)) {
         return false;
+      }
+      for (const auto& option : parsed_options.options) {
+        const std::string& key = option.string_key;
+        if (key.empty() || key == "project_path" || key == "help") {
+          continue;
+        }
+        const auto vmap_it = vmap.find(key);
+        if (vmap_it == vmap.end() || vmap_it->second.defaulted()) {
+          continue;
+        }
+
+        bool applied = false;
+        for (const auto& [name, value] : options_bool_) {
+          if (name == key) {
+            *const_cast<bool*>(value) = vmap_it->second.as<bool>();
+            applied = true;
+            break;
+          }
+        }
+        for (const auto& [name, value] : options_int_) {
+          if (name == key) {
+            *const_cast<int*>(value) = vmap_it->second.as<int>();
+            applied = true;
+            break;
+          }
+        }
+        for (const auto& [name, value] : options_double_) {
+          if (name == key) {
+            *const_cast<double*>(value) = vmap_it->second.as<double>();
+            applied = true;
+            break;
+          }
+        }
+        for (const auto& [name, value] : options_string_) {
+          if (name == key) {
+            *const_cast<std::string*>(value) =
+                vmap_it->second.as<std::string>();
+            applied = true;
+            break;
+          }
+        }
+        for (const auto& [name, value] : options_path_) {
+          if (name == key) {
+            *const_cast<std::filesystem::path*>(value) =
+                vmap_it->second.as<std::string>();
+            applied = true;
+            break;
+          }
+        }
+
+        if (applied) {
+          LOG(INFO) << "Command-line option --" << key
+                    << " overrides project file value.";
+        }
       }
     } else {
       vmap.notify();
