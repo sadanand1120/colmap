@@ -34,27 +34,138 @@
 #include "colmap/util/misc.h"
 #include "colmap/util/timer.h"
 
+#include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <mutex>
+
+#ifndef _WIN32
+#include <unistd.h>
+#endif
+
 namespace colmap {
 namespace {
 
-// Callback functor called after each bundle adjustment iteration.
-class BundleAdjustmentIterationCallback : public ceres::IterationCallback {
+class BundleAdjustmentProgressCallback : public ceres::IterationCallback {
  public:
-  explicit BundleAdjustmentIterationCallback(BaseController* controller)
-      : controller_(controller) {}
+  BundleAdjustmentProgressCallback(BaseController* controller,
+                                   const int max_num_iterations,
+                                   const bool render_progress)
+      : controller_(controller),
+        max_num_iterations_(max_num_iterations),
+#ifdef _WIN32
+        enabled_(false),
+#else
+        enabled_(render_progress && max_num_iterations_ > 0 &&
+                 isatty(fileno(stderr))),
+#endif
+        output_fd_(-1) {
+    start_time_ = std::chrono::steady_clock::now();
+#ifndef _WIN32
+    if (enabled_) {
+      output_fd_ = dup(fileno(stderr));
+    }
+#endif
+  }
+
+  ~BundleAdjustmentProgressCallback() override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ClearLocked();
+#ifndef _WIN32
+    if (output_fd_ != -1) {
+      close(output_fd_);
+      output_fd_ = -1;
+    }
+#endif
+  }
 
   virtual ceres::CallbackReturnType operator()(
       const ceres::IterationSummary& summary) {
     THROW_CHECK_NOTNULL(controller_);
     if (controller_->CheckIfStopped()) {
       return ceres::SOLVER_TERMINATE_SUCCESSFULLY;
-    } else {
-      return ceres::SOLVER_CONTINUE;
     }
+    if (IsEnabled()) {
+      std::lock_guard<std::mutex> lock(mutex_);
+      current_iteration_ = std::max(current_iteration_, summary.iteration);
+      RenderLocked();
+    }
+    return ceres::SOLVER_CONTINUE;
+  }
+
+  void Finish(const std::string& status) {
+    if (!IsEnabled()) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (finished_) {
+      return;
+    }
+    ClearLocked();
+    Write(StringPrintf("Bundle adjustment: %s (%d/%d iterations, %.1fs)\n",
+                       status.c_str(),
+                       std::min(current_iteration_, max_num_iterations_),
+                       max_num_iterations_,
+                       ElapsedSeconds()));
+    finished_ = true;
   }
 
  private:
+  bool IsEnabled() const { return enabled_ && output_fd_ != -1; }
+
+  static std::string MakeBar(const int current,
+                             const int total,
+                             const int width) {
+    const int filled = std::min(width, width * current / total);
+    return std::string(filled, '=') + std::string(width - filled, '-');
+  }
+
+  double ElapsedSeconds() const {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                         start_time_)
+        .count();
+  }
+
+  void RenderLocked() {
+    const int current = std::min(current_iteration_, max_num_iterations_);
+    const double percent = 100.0 * current / max_num_iterations_;
+    const std::string line =
+        StringPrintf("\rBundle adjustment: [%s] %d/%d iterations %5.1f%% %.1fs",
+                     MakeBar(current, max_num_iterations_, 28).c_str(),
+                     current,
+                     max_num_iterations_,
+                     percent,
+                     ElapsedSeconds());
+    Write(line);
+    rendered_width_ = std::max(rendered_width_, line.size() - 1);
+  }
+
+  void ClearLocked() {
+    if (!IsEnabled() || rendered_width_ == 0) {
+      return;
+    }
+    Write("\r" + std::string(rendered_width_, ' ') + "\r");
+    rendered_width_ = 0;
+  }
+
+  void Write(const std::string& text) const {
+#ifndef _WIN32
+    if (output_fd_ != -1) {
+      const ssize_t num_written = write(output_fd_, text.data(), text.size());
+      static_cast<void>(num_written);
+    }
+#endif
+  }
+
   BaseController* controller_;
+  const int max_num_iterations_;
+  const bool enabled_;
+  int output_fd_;
+  std::chrono::steady_clock::time_point start_time_;
+  std::mutex mutex_;
+  int current_iteration_ = 0;
+  bool finished_ = false;
+  size_t rendered_width_ = 0;
 };
 
 }  // namespace
@@ -80,10 +191,22 @@ void BundleAdjustmentController::Run() {
   ObservationManager(*reconstruction_).FilterObservationsWithNegativeDepth();
 
   BundleAdjustmentOptions ba_options = *options_.bundle_adjustment;
+  const bool print_summary = ba_options.print_summary;
+  ba_options.print_summary = false;
 
-  BundleAdjustmentIterationCallback iteration_callback(this);
+  std::unique_ptr<BundleAdjustmentProgressCallback> progress_callback;
   if (ba_options.ceres) {
-    ba_options.ceres->solver_options.callbacks.push_back(&iteration_callback);
+    const bool render_progress =
+        !VLOG_IS_ON(1) &&
+        ba_options.ceres->solver_options.logging_type ==
+            ceres::LoggingType::SILENT &&
+        !ba_options.ceres->solver_options.minimizer_progress_to_stdout;
+    progress_callback = std::make_unique<BundleAdjustmentProgressCallback>(
+        this,
+        ba_options.ceres->solver_options.max_num_iterations,
+        render_progress);
+    ba_options.ceres->solver_options.callbacks.push_back(
+        progress_callback.get());
   }
 
   // Configure bundle adjustment.
@@ -100,7 +223,21 @@ void BundleAdjustmentController::Run() {
   // Run bundle adjustment.
   std::unique_ptr<BundleAdjuster> bundle_adjuster =
       CreateDefaultBundleAdjuster(ba_options, ba_config, *reconstruction_);
-  bundle_adjuster->Solve();
+  const auto summary = bundle_adjuster->Solve();
+  if (progress_callback) {
+    progress_callback->Finish(summary->num_residuals == 0   ? "skipped"
+                              : summary->IsSolutionUsable() ? "complete"
+                                                            : "failed");
+  }
+  if (print_summary || VLOG_IS_ON(1)) {
+    if (const auto ceres_summary =
+            std::dynamic_pointer_cast<CeresBundleAdjustmentSummary>(summary)) {
+      PrintSolverSummary(ceres_summary->ceres_summary,
+                         "Bundle adjustment report");
+    } else {
+      LOG(INFO) << summary->BriefReport();
+    }
+  }
   reconstruction_->UpdatePoint3DErrors();
 
   run_timer.PrintMinutes();
