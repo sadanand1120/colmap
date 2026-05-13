@@ -46,31 +46,21 @@ namespace {
 
 struct ParallelismOverrides {
   int num_cpu_threads = -1;
-  int num_cpu_threads_dash = -1;
   int num_gpu_threads_per_gpu = -1;
-  int num_gpu_threads_per_gpu_dash = -1;
 };
 
 void AddParallelismOverrides(OptionManager& options,
                              ParallelismOverrides* overrides,
                              const bool add_gpu_options) {
-  options.AddDefaultOption("num_cpu_threads", &overrides->num_cpu_threads);
-  options.AddDefaultOption("num-cpu-threads",
-                           &overrides->num_cpu_threads_dash);
+  options.AddDefaultOption("num-cpu-threads", &overrides->num_cpu_threads);
   if (add_gpu_options) {
-    options.AddDefaultOption("num_gpu_threads_per_gpu",
-                             &overrides->num_gpu_threads_per_gpu);
     options.AddDefaultOption("num-gpu-threads-per-gpu",
-                             &overrides->num_gpu_threads_per_gpu_dash);
+                             &overrides->num_gpu_threads_per_gpu);
   }
 }
 
-bool ResolvePositiveOverride(const char* name,
-                             const int underscore_value,
-                             const int dash_value,
-                             int* value) {
-  *value = dash_value != -1 ? dash_value : underscore_value;
-  if (*value != -1 && *value < 1) {
+bool CheckPositiveOverride(const char* name, const int value) {
+  if (value != -1 && value < 1) {
     LOG(ERROR) << name << " must be positive.";
     return false;
   }
@@ -79,30 +69,23 @@ bool ResolvePositiveOverride(const char* name,
 
 bool ApplyCpuThreadOverride(const ParallelismOverrides& overrides,
                             int* num_threads) {
-  int num_cpu_threads = -1;
-  if (!ResolvePositiveOverride("num_cpu_threads",
-                               overrides.num_cpu_threads,
-                               overrides.num_cpu_threads_dash,
-                               &num_cpu_threads)) {
+  if (!CheckPositiveOverride("num-cpu-threads", overrides.num_cpu_threads)) {
     return false;
   }
-  if (num_cpu_threads > 0) {
-    *num_threads = num_cpu_threads;
+  if (overrides.num_cpu_threads > 0) {
+    *num_threads = overrides.num_cpu_threads;
   }
   return true;
 }
 
 bool ApplyGpuThreadOverride(const ParallelismOverrides& overrides,
                             int* num_gpu_threads_per_gpu) {
-  int value = -1;
-  if (!ResolvePositiveOverride("num_gpu_threads_per_gpu",
-                               overrides.num_gpu_threads_per_gpu,
-                               overrides.num_gpu_threads_per_gpu_dash,
-                               &value)) {
+  if (!CheckPositiveOverride("num-gpu-threads-per-gpu",
+                             overrides.num_gpu_threads_per_gpu)) {
     return false;
   }
-  if (value > 0) {
-    *num_gpu_threads_per_gpu = value;
+  if (overrides.num_gpu_threads_per_gpu > 0) {
+    *num_gpu_threads_per_gpu = overrides.num_gpu_threads_per_gpu;
   }
   return true;
 }
@@ -218,8 +201,8 @@ int RunMeshTexturer(int argc, char** argv) {
   if (!options.Parse(argc, argv)) {
     return EXIT_FAILURE;
   }
-  if (!ApplyCpuThreadOverride(
-          parallelism, &options.mesh_texture_mapping->num_threads)) {
+  if (!ApplyCpuThreadOverride(parallelism,
+                              &options.mesh_texture_mapping->num_threads)) {
     return EXIT_FAILURE;
   }
 
@@ -304,8 +287,7 @@ int RunPatchMatchStereo(int argc, char** argv) {
   if (!ApplyCpuThreadOverride(parallelism,
                               &options.patch_match_stereo->num_threads) ||
       !ApplyGpuThreadOverride(
-          parallelism,
-          &options.patch_match_stereo->num_gpu_threads_per_gpu)) {
+          parallelism, &options.patch_match_stereo->num_gpu_threads_per_gpu)) {
     return EXIT_FAILURE;
   }
   RunPatchMatchStereoImpl(workspace_path,
