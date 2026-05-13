@@ -40,6 +40,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <thread>
@@ -239,7 +240,7 @@ class MapperProgress {
         break;
       }
       std::lock_guard<std::mutex> lock(mutex_);
-      if (!finished_ && rendered_lines_ > 0 && !has_bounded_work_) {
+      if (!finished_ && rendered_lines_ > 0) {
         RenderLocked(true);
       }
     }
@@ -335,6 +336,75 @@ class MapperProgress {
 
 namespace {
 
+struct MapperBundleAdjustmentProgressState {
+  std::mutex mutex;
+  int num_solves_started = 0;
+};
+
+class MapperBundleAdjustmentProgressCallback : public ceres::IterationCallback {
+ public:
+  MapperBundleAdjustmentProgressCallback(
+      MapperProgress* progress,
+      std::shared_ptr<MapperBundleAdjustmentProgressState> state,
+      std::string label,
+      const int max_num_iterations,
+      const int max_num_solves)
+      : progress_(progress),
+        state_(std::move(state)),
+        label_(std::move(label)),
+        max_num_iterations_(std::max(max_num_iterations, 1)),
+        max_num_solves_(std::max(max_num_solves, 1)) {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    solve_index_ = ++state_->num_solves_started;
+  }
+
+  ceres::CallbackReturnType operator()(
+      const ceres::IterationSummary& summary) override {
+    if (progress_ != nullptr) {
+      progress_->SetBoundedWork(
+          StringPrintf("%s solve %d/%d",
+                       label_.c_str(),
+                       std::min(solve_index_, max_num_solves_),
+                       max_num_solves_),
+          std::min(summary.iteration, max_num_iterations_),
+          max_num_iterations_);
+    }
+    return ceres::SOLVER_CONTINUE;
+  }
+
+ private:
+  MapperProgress* progress_;
+  std::shared_ptr<MapperBundleAdjustmentProgressState> state_;
+  const std::string label_;
+  const int max_num_iterations_;
+  const int max_num_solves_;
+  int solve_index_ = 0;
+};
+
+void AddMapperBundleAdjustmentProgress(const std::string& label,
+                                       const int max_num_solves,
+                                       MapperProgress* progress,
+                                       BundleAdjustmentOptions* options) {
+  if (progress == nullptr || options == nullptr || !options->ceres ||
+      options->ceres->solver_options.logging_type !=
+          ceres::LoggingType::SILENT ||
+      options->ceres->solver_options.minimizer_progress_to_stdout) {
+    return;
+  }
+
+  auto state = std::make_shared<MapperBundleAdjustmentProgressState>();
+  options->ceres->progress_callback_factory =
+      [progress, state, label, max_num_solves](
+          const ceres::Solver::Options& solver_options) {
+        return std::make_unique<MapperBundleAdjustmentProgressCallback>(
+            progress,
+            state,
+            label,
+            solver_options.max_num_iterations,
+            max_num_solves);
+      };
+}
+
 void CustomizeIncrementalPipelineOptions(const DatabaseCache& database_cache,
                                          IncrementalPipelineOptions& options) {
   // If the total number of images is small then do not enforce the
@@ -385,12 +455,33 @@ void IterativeGlobalRefinement(MapperProgress* progress,
           "Final global refinement: retriangulation and bundle adjustment");
     }
   }
+  BundleAdjustmentOptions ba_options = options.GlobalBundleAdjustment();
+  const int max_num_ba_solves =
+      options.ba_global_max_refinements *
+      (mapper_options.ba_global_ignore_redundant_points3D ? 2 : 1);
+  AddMapperBundleAdjustmentProgress(
+      loop_stage ? "Global BA" : "Final global BA",
+      max_num_ba_solves,
+      progress,
+      &ba_options);
   mapper.IterativeGlobalRefinement(options.ba_global_max_refinements,
                                    options.ba_global_max_refinement_change,
                                    mapper_options,
-                                   options.GlobalBundleAdjustment(),
+                                   ba_options,
                                    options.Triangulation());
+  if (progress != nullptr) {
+    progress->ClearBoundedWork();
+    if (loop_stage) {
+      progress->SetLoopStage(kMapperLoopStageGlobalRefinement,
+                             "Global refinement: filtering frames");
+    } else {
+      progress->SetStage("Final global refinement: filtering frames");
+    }
+  }
   mapper.FilterFrames(mapper_options);
+  if (progress != nullptr) {
+    progress->ClearBoundedWork();
+  }
 }
 
 void ExtractColors(const std::filesystem::path& image_path,
@@ -763,7 +854,13 @@ IncrementalPipeline::Status IncrementalPipeline::InitializeReconstruction(
   }
 
   progress_->SetStage("Initial global bundle adjustment");
-  mapper.AdjustGlobalBundle(mapper_options, options_->GlobalBundleAdjustment());
+  BundleAdjustmentOptions ba_options = options_->GlobalBundleAdjustment();
+  AddMapperBundleAdjustmentProgress("Initial global BA",
+                                    /*max_num_solves=*/1,
+                                    progress_.get(),
+                                    &ba_options);
+  mapper.AdjustGlobalBundle(mapper_options, ba_options);
+  progress_->ClearBoundedWork();
   reconstruction.Normalize();
   mapper.FilterPoints(mapper_options);
   mapper.FilterFrames(mapper_options);
@@ -960,12 +1057,18 @@ IncrementalPipeline::Status IncrementalPipeline::ReconstructSubModel(
       progress_->SetLoopStage(
           kMapperLoopStageLocalRefinement,
           StringPrintf("Local refinement after image #%d", next_image_id));
+      BundleAdjustmentOptions ba_options = options_->LocalBundleAdjustment();
+      AddMapperBundleAdjustmentProgress("Local BA",
+                                        options_->ba_local_max_refinements,
+                                        progress_.get(),
+                                        &ba_options);
       mapper.IterativeLocalRefinement(options_->ba_local_max_refinements,
                                       options_->ba_local_max_refinement_change,
                                       mapper_options,
-                                      options_->LocalBundleAdjustment(),
+                                      ba_options,
                                       options_->Triangulation(),
                                       next_image_id);
+      progress_->ClearBoundedWork();
 
       if (CheckRunGlobalRefinement(
               *reconstruction, ba_prev_num_reg_frames, ba_prev_num_points)) {

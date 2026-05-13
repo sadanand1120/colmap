@@ -42,55 +42,6 @@
 #include "colmap/util/ply.h"
 
 namespace colmap {
-namespace {
-
-struct ParallelismOverrides {
-  int num_cpu_threads = -1;
-  int num_gpu_threads_per_gpu = -1;
-};
-
-void AddParallelismOverrides(OptionManager& options,
-                             ParallelismOverrides* overrides,
-                             const bool add_gpu_options) {
-  options.AddDefaultOption("num-cpu-threads", &overrides->num_cpu_threads);
-  if (add_gpu_options) {
-    options.AddDefaultOption("num-gpu-threads-per-gpu",
-                             &overrides->num_gpu_threads_per_gpu);
-  }
-}
-
-bool CheckPositiveOverride(const char* name, const int value) {
-  if (value != -1 && value < 1) {
-    LOG(ERROR) << name << " must be positive.";
-    return false;
-  }
-  return true;
-}
-
-bool ApplyCpuThreadOverride(const ParallelismOverrides& overrides,
-                            int* num_threads) {
-  if (!CheckPositiveOverride("num-cpu-threads", overrides.num_cpu_threads)) {
-    return false;
-  }
-  if (overrides.num_cpu_threads > 0) {
-    *num_threads = overrides.num_cpu_threads;
-  }
-  return true;
-}
-
-bool ApplyGpuThreadOverride(const ParallelismOverrides& overrides,
-                            int* num_gpu_threads_per_gpu) {
-  if (!CheckPositiveOverride("num-gpu-threads-per-gpu",
-                             overrides.num_gpu_threads_per_gpu)) {
-    return false;
-  }
-  if (overrides.num_gpu_threads_per_gpu > 0) {
-    *num_gpu_threads_per_gpu = overrides.num_gpu_threads_per_gpu;
-  }
-  return true;
-}
-
-}  // namespace
 
 int RunDelaunayMesher(int argc, char** argv) {
 #if !defined(COLMAP_CGAL_ENABLED)
@@ -101,7 +52,6 @@ int RunDelaunayMesher(int argc, char** argv) {
   std::filesystem::path input_path;
   std::string input_type = "dense";
   std::filesystem::path output_path;
-  ParallelismOverrides parallelism;
 
   OptionManager options;
   options.AddRequiredOption(
@@ -111,12 +61,7 @@ int RunDelaunayMesher(int argc, char** argv) {
   options.AddDefaultOption("input_type", &input_type, "{dense, sparse}");
   options.AddRequiredOption("output_path", &output_path);
   options.AddDelaunayMeshingOptions();
-  AddParallelismOverrides(options, &parallelism, /*add_gpu_options=*/false);
   if (!options.Parse(argc, argv)) {
-    return EXIT_FAILURE;
-  }
-  if (!ApplyCpuThreadOverride(parallelism,
-                              &options.delaunay_meshing->num_threads)) {
     return EXIT_FAILURE;
   }
 
@@ -140,7 +85,6 @@ int RunDelaunayMesher(int argc, char** argv) {
 int RunMeshSimplifier(int argc, char** argv) {
   std::filesystem::path input_path;
   std::filesystem::path output_path;
-  ParallelismOverrides parallelism;
 
   OptionManager options;
   options.AddRequiredOption(
@@ -148,12 +92,7 @@ int RunMeshSimplifier(int argc, char** argv) {
   options.AddRequiredOption(
       "output_path", &output_path, "Path to output PLY mesh");
   options.AddMeshSimplificationOptions();
-  AddParallelismOverrides(options, &parallelism, /*add_gpu_options=*/false);
   if (!options.Parse(argc, argv)) {
-    return EXIT_FAILURE;
-  }
-  if (!ApplyCpuThreadOverride(parallelism,
-                              &options.mesh_simplification->num_threads)) {
     return EXIT_FAILURE;
   }
 
@@ -180,7 +119,6 @@ int RunMeshTexturer(int argc, char** argv) {
   std::filesystem::path input_path;
   std::filesystem::path output_path;
   std::string output_type = "BIN";
-  ParallelismOverrides parallelism;
 
   OptionManager options;
   options.AddRequiredOption(
@@ -197,12 +135,7 @@ int RunMeshTexturer(int argc, char** argv) {
       "atlas image will be written here");
   options.AddDefaultOption("output_type", &output_type, "{BIN, TXT}");
   options.AddMeshTextureMappingOptions();
-  AddParallelismOverrides(options, &parallelism, /*add_gpu_options=*/false);
   if (!options.Parse(argc, argv)) {
-    return EXIT_FAILURE;
-  }
-  if (!ApplyCpuThreadOverride(parallelism,
-                              &options.mesh_texture_mapping->num_threads)) {
     return EXIT_FAILURE;
   }
 
@@ -268,7 +201,6 @@ int RunPatchMatchStereo(int argc, char** argv) {
   std::string workspace_format = "COLMAP";
   std::string pmvs_option_name = "option-all";
   std::filesystem::path config_path;
-  ParallelismOverrides parallelism;
 
   OptionManager options;
   options.AddRequiredOption(
@@ -280,14 +212,7 @@ int RunPatchMatchStereo(int argc, char** argv) {
   options.AddDefaultOption("pmvs_option_name", &pmvs_option_name);
   options.AddDefaultOption("config_path", &config_path);
   options.AddPatchMatchStereoOptions();
-  AddParallelismOverrides(options, &parallelism, /*add_gpu_options=*/true);
   if (!options.Parse(argc, argv)) {
-    return EXIT_FAILURE;
-  }
-  if (!ApplyCpuThreadOverride(parallelism,
-                              &options.patch_match_stereo->num_threads) ||
-      !ApplyGpuThreadOverride(
-          parallelism, &options.patch_match_stereo->num_gpu_threads_per_gpu)) {
     return EXIT_FAILURE;
   }
   RunPatchMatchStereoImpl(workspace_path,
@@ -327,18 +252,12 @@ void RunPatchMatchStereoImpl(const std::filesystem::path& workspace_path,
 int RunPoissonMesher(int argc, char** argv) {
   std::filesystem::path input_path;
   std::filesystem::path output_path;
-  ParallelismOverrides parallelism;
 
   OptionManager options;
   options.AddRequiredOption("input_path", &input_path);
   options.AddRequiredOption("output_path", &output_path);
   options.AddPoissonMeshingOptions();
-  AddParallelismOverrides(options, &parallelism, /*add_gpu_options=*/false);
   if (!options.Parse(argc, argv)) {
-    return EXIT_FAILURE;
-  }
-  if (!ApplyCpuThreadOverride(parallelism,
-                              &options.poisson_meshing->num_threads)) {
     return EXIT_FAILURE;
   }
 
@@ -355,7 +274,6 @@ int RunStereoFuser(int argc, char** argv) {
   std::string pmvs_option_name = "option-all";
   std::string output_type = "PLY";
   std::filesystem::path output_path;
-  ParallelismOverrides parallelism;
 
   OptionManager options;
   options.AddRequiredOption("workspace_path", &workspace_path);
@@ -367,12 +285,7 @@ int RunStereoFuser(int argc, char** argv) {
   options.AddDefaultOption("output_type", &output_type, "{BIN, TXT, PLY}");
   options.AddRequiredOption("output_path", &output_path);
   options.AddStereoFusionOptions();
-  AddParallelismOverrides(options, &parallelism, /*add_gpu_options=*/false);
   if (!options.Parse(argc, argv)) {
-    return EXIT_FAILURE;
-  }
-  if (!ApplyCpuThreadOverride(parallelism,
-                              &options.stereo_fusion->num_threads)) {
     return EXIT_FAILURE;
   }
 

@@ -33,6 +33,8 @@
 #include "colmap/math/math.h"
 #include "colmap/optim/ransac.h"
 
+#include <functional>
+
 #include <ceres/ceres.h>
 
 namespace colmap {
@@ -52,6 +54,12 @@ struct CeresBundleAdjustmentOptions {
 
   // Ceres-Solver options.
   ceres::Solver::Options solver_options;
+
+  // Optional factory for per-solve progress callbacks. The factory receives the
+  // final solver options after COLMAP has adjusted them for the problem size.
+  std::function<std::unique_ptr<ceres::IterationCallback>(
+      const ceres::Solver::Options&)>
+      progress_callback_factory;
 
   // Heuristic threshold to switch from CPU to GPU based solvers.
   // Typically, the GPU is faster for large problems but the overhead of

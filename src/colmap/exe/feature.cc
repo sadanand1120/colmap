@@ -42,77 +42,6 @@
 #include "colmap/util/threading.h"
 
 namespace colmap {
-namespace {
-
-struct ParallelismOverrides {
-  int num_cpu_threads = -1;
-  int num_gpu_threads_per_gpu = -1;
-};
-
-void AddParallelismOverrides(OptionManager& options,
-                             ParallelismOverrides* overrides,
-                             const bool add_gpu_options) {
-  options.AddDefaultOption("num-cpu-threads", &overrides->num_cpu_threads);
-  if (add_gpu_options) {
-    options.AddDefaultOption("num-gpu-threads-per-gpu",
-                             &overrides->num_gpu_threads_per_gpu);
-  }
-}
-
-bool CheckPositiveOverride(const char* name, const int value) {
-  if (value != -1 && value < 1) {
-    LOG(ERROR) << name << " must be positive.";
-    return false;
-  }
-  return true;
-}
-
-bool ApplyFeatureExtractionParallelism(
-    const ParallelismOverrides& overrides,
-    FeatureExtractionOptions* extraction_options) {
-  if (!CheckPositiveOverride("num-cpu-threads", overrides.num_cpu_threads)) {
-    return false;
-  }
-  if (overrides.num_cpu_threads > 0) {
-    extraction_options->num_threads = overrides.num_cpu_threads;
-  }
-
-  if (!CheckPositiveOverride("num-gpu-threads-per-gpu",
-                             overrides.num_gpu_threads_per_gpu)) {
-    return false;
-  }
-  if (overrides.num_gpu_threads_per_gpu > 0) {
-    extraction_options->num_gpu_threads_per_gpu =
-        overrides.num_gpu_threads_per_gpu;
-  }
-  return true;
-}
-
-bool ApplyFeatureMatchingParallelism(const ParallelismOverrides& overrides,
-                                     FeatureMatchingOptions* matching_options,
-                                     int* pairing_num_threads = nullptr) {
-  if (!CheckPositiveOverride("num-cpu-threads", overrides.num_cpu_threads)) {
-    return false;
-  }
-  if (overrides.num_cpu_threads > 0) {
-    matching_options->num_threads = overrides.num_cpu_threads;
-    if (pairing_num_threads != nullptr) {
-      *pairing_num_threads = overrides.num_cpu_threads;
-    }
-  }
-
-  if (!CheckPositiveOverride("num-gpu-threads-per-gpu",
-                             overrides.num_gpu_threads_per_gpu)) {
-    return false;
-  }
-  if (overrides.num_gpu_threads_per_gpu > 0) {
-    matching_options->num_gpu_threads_per_gpu =
-        overrides.num_gpu_threads_per_gpu;
-  }
-  return true;
-}
-
-}  // namespace
 
 bool VerifyCameraParams(const std::string& camera_model,
                         const std::string& params) {
@@ -162,7 +91,6 @@ int RunFeatureExtractor(int argc, char** argv) {
   std::filesystem::path image_list_path;
   int camera_mode = -1;
   std::string descriptor_normalization = "l1_root";
-  ParallelismOverrides parallelism;
 
   OptionManager options;
   options.AddDatabaseOptions();
@@ -172,13 +100,8 @@ int RunFeatureExtractor(int argc, char** argv) {
   options.AddDefaultOption("descriptor_normalization",
                            &descriptor_normalization,
                            "{'l1_root', 'l2'}");
-  AddParallelismOverrides(options, &parallelism, /*add_gpu_options=*/true);
   options.AddFeatureExtractionOptions();
   if (!options.Parse(argc, argv)) {
-    return EXIT_FAILURE;
-  }
-  if (!ApplyFeatureExtractionParallelism(parallelism,
-                                         options.feature_extraction.get())) {
     return EXIT_FAILURE;
   }
 
@@ -274,17 +197,10 @@ int RunFeatureImporter(int argc, char** argv) {
 }
 
 int RunExhaustiveMatcher(int argc, char** argv) {
-  ParallelismOverrides parallelism;
-
   OptionManager options;
   options.AddDatabaseOptions();
   options.AddExhaustivePairingOptions();
-  AddParallelismOverrides(options, &parallelism, /*add_gpu_options=*/true);
   if (!options.Parse(argc, argv)) {
-    return EXIT_FAILURE;
-  }
-  if (!ApplyFeatureMatchingParallelism(parallelism,
-                                       options.feature_matching.get())) {
     return EXIT_FAILURE;
   }
 
@@ -311,7 +227,6 @@ int RunExhaustiveMatcher(int argc, char** argv) {
 int RunMatchesImporter(int argc, char** argv) {
   std::filesystem::path match_list_path;
   std::string match_type = "pairs";
-  ParallelismOverrides parallelism;
 
   OptionManager options;
   options.AddDatabaseOptions();
@@ -320,12 +235,7 @@ int RunMatchesImporter(int argc, char** argv) {
       "match_type", &match_type, "{'pairs', 'raw', 'inliers'}");
   options.AddFeatureMatchingOptions();
   options.AddTwoViewGeometryOptions();
-  AddParallelismOverrides(options, &parallelism, /*add_gpu_options=*/true);
   if (!options.Parse(argc, argv)) {
-    return EXIT_FAILURE;
-  }
-  if (!ApplyFeatureMatchingParallelism(parallelism,
-                                       options.feature_matching.get())) {
     return EXIT_FAILURE;
   }
 
@@ -366,19 +276,10 @@ int RunMatchesImporter(int argc, char** argv) {
 }
 
 int RunSequentialMatcher(int argc, char** argv) {
-  ParallelismOverrides parallelism;
-
   OptionManager options;
   options.AddDatabaseOptions();
   options.AddSequentialPairingOptions();
-  AddParallelismOverrides(options, &parallelism, /*add_gpu_options=*/true);
   if (!options.Parse(argc, argv)) {
-    return EXIT_FAILURE;
-  }
-  if (!ApplyFeatureMatchingParallelism(
-          parallelism,
-          options.feature_matching.get(),
-          &options.sequential_pairing->num_threads)) {
     return EXIT_FAILURE;
   }
 
@@ -403,18 +304,10 @@ int RunSequentialMatcher(int argc, char** argv) {
 }
 
 int RunSpatialMatcher(int argc, char** argv) {
-  ParallelismOverrides parallelism;
-
   OptionManager options;
   options.AddDatabaseOptions();
   options.AddSpatialPairingOptions();
-  AddParallelismOverrides(options, &parallelism, /*add_gpu_options=*/true);
   if (!options.Parse(argc, argv)) {
-    return EXIT_FAILURE;
-  }
-  if (!ApplyFeatureMatchingParallelism(parallelism,
-                                       options.feature_matching.get(),
-                                       &options.spatial_pairing->num_threads)) {
     return EXIT_FAILURE;
   }
 
@@ -439,17 +332,10 @@ int RunSpatialMatcher(int argc, char** argv) {
 }
 
 int RunTransitiveMatcher(int argc, char** argv) {
-  ParallelismOverrides parallelism;
-
   OptionManager options;
   options.AddDatabaseOptions();
   options.AddTransitivePairingOptions();
-  AddParallelismOverrides(options, &parallelism, /*add_gpu_options=*/true);
   if (!options.Parse(argc, argv)) {
-    return EXIT_FAILURE;
-  }
-  if (!ApplyFeatureMatchingParallelism(parallelism,
-                                       options.feature_matching.get())) {
     return EXIT_FAILURE;
   }
 
@@ -474,19 +360,10 @@ int RunTransitiveMatcher(int argc, char** argv) {
 }
 
 int RunVocabTreeMatcher(int argc, char** argv) {
-  ParallelismOverrides parallelism;
-
   OptionManager options;
   options.AddDatabaseOptions();
   options.AddVocabTreePairingOptions();
-  AddParallelismOverrides(options, &parallelism, /*add_gpu_options=*/true);
   if (!options.Parse(argc, argv)) {
-    return EXIT_FAILURE;
-  }
-  if (!ApplyFeatureMatchingParallelism(
-          parallelism,
-          options.feature_matching.get(),
-          &options.vocab_tree_pairing->num_threads)) {
     return EXIT_FAILURE;
   }
 
@@ -513,24 +390,16 @@ int RunVocabTreeMatcher(int argc, char** argv) {
 int RunGeometricVerifier(int argc, char** argv) {
   ExistingMatchedPairingOptions pairing_options;
   GeometricVerifierOptions verifier_options;
-  ParallelismOverrides parallelism;
 
   OptionManager options;
   options.AddDatabaseOptions();
   options.AddTwoViewGeometryOptions();
   options.AddDefaultOption("batch_size", &pairing_options.batch_size);
   options.AddDefaultOption("num_threads", &verifier_options.num_threads);
-  AddParallelismOverrides(options, &parallelism, /*add_gpu_options=*/false);
   options.AddDefaultOption("rig_verification",
                            &verifier_options.rig_verification);
   if (!options.Parse(argc, argv)) {
     return EXIT_FAILURE;
-  }
-  if (!CheckPositiveOverride("num-cpu-threads", parallelism.num_cpu_threads)) {
-    return EXIT_FAILURE;
-  }
-  if (parallelism.num_cpu_threads > 0) {
-    verifier_options.num_threads = parallelism.num_cpu_threads;
   }
 
   auto verifier = CreateGeometricVerifier(verifier_options,
@@ -595,7 +464,6 @@ int RunGuidedGeometricVerifier(int argc, char** argv) {
   std::filesystem::path input_path;
   ExistingMatchedPairingOptions pairing_options;
   int num_threads = -1;
-  ParallelismOverrides parallelism;
 
   OptionManager options;
   options.AddRequiredOption("input_path", &input_path);
@@ -603,15 +471,8 @@ int RunGuidedGeometricVerifier(int argc, char** argv) {
   options.AddTwoViewGeometryOptions();
   options.AddDefaultOption("batch_size", &pairing_options.batch_size);
   options.AddDefaultOption("num_threads", &num_threads);
-  AddParallelismOverrides(options, &parallelism, /*add_gpu_options=*/false);
   if (!options.Parse(argc, argv)) {
     return EXIT_FAILURE;
-  }
-  if (!CheckPositiveOverride("num-cpu-threads", parallelism.num_cpu_threads)) {
-    return EXIT_FAILURE;
-  }
-  if (parallelism.num_cpu_threads > 0) {
-    num_threads = parallelism.num_cpu_threads;
   }
 
   if (!ExistsDir(input_path)) {

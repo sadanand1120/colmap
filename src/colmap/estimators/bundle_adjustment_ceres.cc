@@ -597,8 +597,18 @@ ceres::Solver::Summary SolveWithGpuFallback(
     const BundleAdjustmentOptions& options,
     const BundleAdjustmentConfig& config,
     ceres::Problem* problem) {
-  const ceres::Solver::Options solver_options =
+  ceres::Solver::Options solver_options =
       options.ceres->CreateSolverOptions(config, *problem);
+  std::unique_ptr<ceres::IterationCallback> progress_callback;
+  if (options.ceres->progress_callback_factory &&
+      solver_options.logging_type == ceres::LoggingType::SILENT &&
+      !solver_options.minimizer_progress_to_stdout) {
+    progress_callback =
+        options.ceres->progress_callback_factory(solver_options);
+    if (progress_callback) {
+      solver_options.callbacks.push_back(progress_callback.get());
+    }
+  }
 
   ceres::Solver::Summary ceres_summary;
   {
@@ -618,8 +628,18 @@ ceres::Solver::Summary SolveWithGpuFallback(
       auto cpu_options =
           std::make_shared<CeresBundleAdjustmentOptions>(*options.ceres);
       cpu_options->use_gpu = false;
-      const ceres::Solver::Options cpu_solver_options =
+      ceres::Solver::Options cpu_solver_options =
           cpu_options->CreateSolverOptions(config, *problem);
+      std::unique_ptr<ceres::IterationCallback> cpu_progress_callback;
+      if (cpu_options->progress_callback_factory &&
+          cpu_solver_options.logging_type == ceres::LoggingType::SILENT &&
+          !cpu_solver_options.minimizer_progress_to_stdout) {
+        cpu_progress_callback =
+            cpu_options->progress_callback_factory(cpu_solver_options);
+        if (cpu_progress_callback) {
+          cpu_solver_options.callbacks.push_back(cpu_progress_callback.get());
+        }
+      }
       {
         ScopedStderrSilencer silence_stderr(cpu_solver_options.logging_type ==
                                             ceres::LoggingType::SILENT);
