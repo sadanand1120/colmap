@@ -465,6 +465,12 @@ configure_file("${CMAKE_CURRENT_SOURCE_DIR}/cmake/colmap-config-version.cmake.in
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/colmap-config-version.cmake"
         DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/colmap")
 
+# Install default command project files.
+install(
+    DIRECTORY default_configs
+    DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/colmap
+    FILES_MATCHING PATTERN "*.ini")
+
 # Install targets.
 install(
     EXPORT colmap-targets
