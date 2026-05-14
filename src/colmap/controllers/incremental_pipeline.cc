@@ -45,6 +45,7 @@
 #include <sstream>
 #include <thread>
 #include <unordered_set>
+#include <vector>
 
 #ifndef _WIN32
 #include <unistd.h>
@@ -60,6 +61,15 @@ constexpr size_t kMapperLoopStageColorExtraction = 4;
 constexpr size_t kMapperLoopStageSnapshot = 5;
 constexpr size_t kMapperLoopStageImageRegistration = 6;
 
+static std::string FormatElapsedHms(const double elapsed_seconds) {
+  const auto total_seconds =
+      static_cast<long long>(std::llround(elapsed_seconds));
+  const auto hours = total_seconds / 3600;
+  const auto minutes = (total_seconds % 3600) / 60;
+  const auto seconds = total_seconds % 60;
+  return StringPrintf("%lldh %02lldm %02llds", hours, minutes, seconds);
+}
+
 class MapperProgress {
  public:
   explicit MapperProgress(const size_t total_images)
@@ -72,7 +82,7 @@ class MapperProgress {
         output_fd_(-1),
         finished_(false),
         rendered_lines_(0) {
-    timer_.Start();
+    total_timer_.Start();
 #ifndef _WIN32
     if (enabled_) {
       output_fd_ = dup(fileno(stderr));
@@ -93,6 +103,25 @@ class MapperProgress {
       output_fd_ = -1;
     }
 #endif
+  }
+
+  void BeginReconstructCall(const size_t current,
+                            const size_t total,
+                            std::string stage) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    has_reconstruct_progress_ = true;
+    reconstruct_current_ = std::min(current, total);
+    reconstruct_total_ = std::max<size_t>(total, 1);
+    reconstruct_stage_ = std::move(stage);
+    reconstruct_timer_.Restart();
+    has_model_progress_ = false;
+    has_current_model_progress_ = false;
+    current_model_num_registered_images_ = 0;
+    best_model_trial_ = 0;
+    best_model_num_registered_images_ = 0;
+    has_bounded_work_ = false;
+    stage_ = "Waiting for model attempt";
+    RenderLocked(true);
   }
 
   void SetStage(std::string stage) {
@@ -118,6 +147,30 @@ class MapperProgress {
     model_max_kept_ = std::max<size_t>(max_kept, 1);
     model_stage_ = std::move(stage);
     RenderLocked(true);
+  }
+
+  void BeginCurrentModel(const size_t model_trial) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    has_current_model_progress_ = true;
+    current_model_trial_ = model_trial;
+    current_model_num_registered_images_ = 0;
+    current_model_timer_.Restart();
+    has_bounded_work_ = false;
+    if (has_model_progress_) {
+      model_stage_ = "Trying current model";
+    }
+    stage_ = "Starting current model";
+    RenderLocked(true);
+  }
+
+  void SetCurrentModelRegisteredImageCount(const size_t count) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!has_current_model_progress_) {
+      return;
+    }
+    current_model_num_registered_images_ = std::min(count, total_images_);
+    UpdateBestModelLocked();
+    RenderLocked();
   }
 
   void SetBoundedWork(std::string label,
@@ -163,30 +216,11 @@ class MapperProgress {
     RenderLocked(true);
   }
 
-  void MarkRegisteredImage(const image_t image_id) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (image_id != kInvalidImageId &&
-        registered_image_ids_.insert(image_id).second) {
-      RenderLocked();
-    }
-  }
-
-  void MarkRegisteredFrame(const Frame& frame) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    bool changed = false;
-    for (const data_t& data_id : frame.ImageIds()) {
-      if (data_id.id != kInvalidImageId) {
-        changed |= registered_image_ids_.insert(data_id.id).second;
-      }
-    }
-    if (changed) {
-      RenderLocked();
-    }
-  }
-
   void Finish(const std::string& stage) {
     StopHeartbeat();
-    size_t num_registered_images = 0;
+    size_t best_num_registered_images = 0;
+    size_t best_reconstruct_call = 0;
+    size_t best_model_trial = 0;
     std::string elapsed;
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -197,16 +231,21 @@ class MapperProgress {
       has_bounded_work_ = false;
       RenderLocked(true);
       ClearLocked();
-      num_registered_images = registered_image_ids_.size();
-      elapsed = FormatElapsed();
+      best_num_registered_images = overall_best_model_num_registered_images_;
+      best_reconstruct_call = overall_best_reconstruct_call_;
+      best_model_trial = overall_best_model_trial_;
+      elapsed = FormatElapsed(total_timer_);
       finished_ = true;
     }
     if (IsEnabled()) {
-      Write(StringPrintf("Mapper: %s (%zu/%zu unique images, %s)\n",
-                         stage.c_str(),
-                         num_registered_images,
-                         total_images_,
-                         elapsed.c_str()));
+      Write(StringPrintf(
+          "Mapper: %s (best reconstruct %zu, try %zu: %zu/%zu images, %s)\n",
+          stage.c_str(),
+          best_reconstruct_call,
+          best_model_trial,
+          best_num_registered_images,
+          total_images_,
+          elapsed.c_str()));
     }
   }
 
@@ -241,13 +280,23 @@ class MapperProgress {
         "(%zu/%zu) %s", stage_index, kMapperLoopNumStages, stage.c_str());
   }
 
-  std::string FormatElapsed() const {
-    const auto total_seconds =
-        static_cast<long long>(std::llround(timer_.ElapsedSeconds()));
-    const auto hours = total_seconds / 3600;
-    const auto minutes = (total_seconds % 3600) / 60;
-    const auto seconds = total_seconds % 60;
-    return StringPrintf("%lldh %02lldm %02llds", hours, minutes, seconds);
+  std::string FormatElapsed(const Timer& timer) const {
+    return FormatElapsedHms(timer.ElapsedSeconds());
+  }
+
+  void UpdateBestModelLocked() {
+    if (current_model_num_registered_images_ >
+        best_model_num_registered_images_) {
+      best_model_num_registered_images_ = current_model_num_registered_images_;
+      best_model_trial_ = current_model_trial_;
+    }
+    if (current_model_num_registered_images_ >
+        overall_best_model_num_registered_images_) {
+      overall_best_model_num_registered_images_ =
+          current_model_num_registered_images_;
+      overall_best_reconstruct_call_ = reconstruct_current_;
+      overall_best_model_trial_ = current_model_trial_;
+    }
   }
 
   void HeartbeatLoop() {
@@ -304,52 +353,94 @@ class MapperProgress {
       return;
     }
 
-    const size_t current = registered_image_ids_.size();
-    std::ostringstream model_line;
+    std::vector<std::string> lines;
+    if (has_reconstruct_progress_) {
+      std::ostringstream reconstruct_line;
+      reconstruct_line << "Reconstruct calls ["
+                       << MakeBar(reconstruct_current_, reconstruct_total_, 28)
+                       << "] " << reconstruct_current_ << "/"
+                       << reconstruct_total_ << " "
+                       << FormatPercent(reconstruct_current_,
+                                        reconstruct_total_)
+                       << " | " << reconstruct_stage_ << " | "
+                       << FormatElapsed(total_timer_);
+      lines.push_back(reconstruct_line.str());
+    }
+
     if (has_model_progress_) {
+      std::ostringstream model_line;
       model_line << "Model attempts ["
                  << MakeBar(model_current_, model_total_, 28) << "] "
                  << model_current_ << "/" << model_total_ << " "
                  << FormatPercent(model_current_, model_total_) << " | kept "
-                 << model_kept_ << "/" << model_max_kept_ << " | "
-                 << model_stage_ << " | " << FormatElapsed();
+                 << model_kept_ << "/" << model_max_kept_ << " | best ";
+      if (best_model_trial_ == 0) {
+        model_line << "none";
+      } else {
+        model_line << "try " << best_model_trial_ << ": "
+                   << best_model_num_registered_images_ << "/" << total_images_
+                   << " images";
+      }
+      model_line << " | " << model_stage_ << " | "
+                 << FormatElapsed(reconstruct_timer_);
+      lines.push_back((has_reconstruct_progress_ ? "  " : "") +
+                      model_line.str());
     }
 
-    std::ostringstream line1;
-    line1 << (has_model_progress_ ? "  " : "") << "Unique registered images ["
-          << MakeBar(current, total_images_, 28) << "] " << current << "/"
-          << total_images_ << " " << FormatPercent(current, total_images_)
-          << " | " << stage_ << " | " << FormatElapsed();
+    if (has_current_model_progress_) {
+      std::ostringstream current_model_line;
+      current_model_line
+          << "Current model registered images ["
+          << MakeBar(current_model_num_registered_images_, total_images_, 28)
+          << "] " << current_model_num_registered_images_ << "/"
+          << total_images_ << " "
+          << FormatPercent(current_model_num_registered_images_, total_images_)
+          << " | " << stage_ << " | " << FormatElapsed(current_model_timer_);
+      if (has_model_progress_) {
+        lines.push_back("    " + current_model_line.str());
+      } else if (has_reconstruct_progress_) {
+        lines.push_back("  " + current_model_line.str());
+      } else {
+        lines.push_back(current_model_line.str());
+      }
+    } else if (!has_reconstruct_progress_ && !has_model_progress_) {
+      lines.push_back("Mapper | " + stage_ + " | " +
+                      FormatElapsed(total_timer_));
+    }
 
-    std::ostringstream line2;
     if (has_bounded_work_) {
-      line2 << (has_model_progress_ ? "    " : "  ") << bounded_label_ << " ["
-            << MakeBar(bounded_current_, bounded_total_, 24) << "] "
-            << bounded_current_ << "/" << bounded_total_ << " "
-            << FormatPercent(bounded_current_, bounded_total_);
+      std::ostringstream bounded_line;
+      if (has_current_model_progress_) {
+        bounded_line << "      ";
+      } else if (has_model_progress_) {
+        bounded_line << "    ";
+      } else if (has_reconstruct_progress_) {
+        bounded_line << "  ";
+      }
+      bounded_line << bounded_label_ << " ["
+                   << MakeBar(bounded_current_, bounded_total_, 24) << "] "
+                   << bounded_current_ << "/" << bounded_total_ << " "
+                   << FormatPercent(bounded_current_, bounded_total_);
+      lines.push_back(bounded_line.str());
     }
 
     ClearLocked();
-    if (has_model_progress_) {
-      Write(model_line.str());
-      rendered_lines_ = 1;
-      Write("\n" + line1.str());
-      rendered_lines_ = 2;
-    } else {
-      Write(line1.str());
-      rendered_lines_ = 1;
+    for (size_t i = 0; i < lines.size(); ++i) {
+      if (i > 0) {
+        Write("\n");
+      }
+      Write(lines[i]);
     }
-    if (has_bounded_work_) {
-      Write("\n" + line2.str());
-      ++rendered_lines_;
-    }
+    rendered_lines_ = lines.size();
     last_render_at_ = now;
   }
 
   static constexpr auto kMinRenderInterval = std::chrono::milliseconds(120);
   static constexpr auto kHeartbeatInterval = std::chrono::seconds(1);
 
-  Timer timer_;
+  Timer total_timer_;
+  Timer reconstruct_timer_;
+  Timer current_model_timer_;
   const size_t total_images_;
   const bool enabled_;
   int output_fd_;
@@ -360,14 +451,25 @@ class MapperProgress {
   size_t rendered_lines_;
   std::chrono::steady_clock::time_point last_render_at_ =
       std::chrono::steady_clock::time_point::min();
+  bool has_reconstruct_progress_ = false;
+  size_t reconstruct_current_ = 0;
+  size_t reconstruct_total_ = 1;
+  std::string reconstruct_stage_ = "Starting";
   bool has_model_progress_ = false;
   size_t model_current_ = 0;
   size_t model_total_ = 1;
   size_t model_kept_ = 0;
   size_t model_max_kept_ = 1;
   std::string model_stage_ = "Starting";
+  bool has_current_model_progress_ = false;
+  size_t current_model_trial_ = 0;
+  size_t current_model_num_registered_images_ = 0;
+  size_t best_model_trial_ = 0;
+  size_t best_model_num_registered_images_ = 0;
+  size_t overall_best_reconstruct_call_ = 0;
+  size_t overall_best_model_trial_ = 0;
+  size_t overall_best_model_num_registered_images_ = 0;
   std::string stage_ = "Starting";
-  std::unordered_set<image_t> registered_image_ids_;
   bool has_bounded_work_ = false;
   std::string bounded_label_;
   size_t bounded_current_ = 0;
@@ -520,6 +622,8 @@ void IterativeGlobalRefinement(MapperProgress* progress,
   }
   mapper.FilterFrames(mapper_options);
   if (progress != nullptr) {
+    progress->SetCurrentModelRegisteredImageCount(
+        mapper.Reconstruction()->NumRegImages());
     progress->ClearBoundedWork();
   }
 }
@@ -720,7 +824,7 @@ IncrementalPipeline::IncrementalPipeline(
   database_cache_ = DatabaseCache::Create(
       *database,
       CreateDatabaseCacheOptions(*options_, *reconstruction_manager_));
-  timer.PrintMinutes();
+  LOG(INFO) << "Elapsed time: " << FormatElapsedHms(timer.ElapsedSeconds());
 
   CustomizeIncrementalPipelineOptions(*database_cache_, *options_);
   progress_ = std::make_unique<MapperProgress>(database_cache_->NumImages());
@@ -775,15 +879,24 @@ void IncrementalPipeline::Run() {
          "but multiple are given.";
 
   const size_t num_images = database_cache_->NumImages();
+  const size_t kNumInitRelaxations = 2;
+  const size_t max_reconstruct_calls = 1 + 2 * kNumInitRelaxations;
+  size_t reconstruct_call = 0;
 
   IncrementalMapper::Options mapper_options = options_->Mapper();
   IncrementalMapper mapper(database_cache_);
+  progress_->BeginReconstructCall(++reconstruct_call,
+                                  max_reconstruct_calls,
+                                  continue_reconstruction
+                                      ? "Continuing existing reconstruction"
+                                      : "Initial thresholds");
   if (Reconstruct(mapper,
                   mapper_options,
                   /*continue_reconstruction=*/continue_reconstruction) ==
       Status::STOP) {
     progress_->Finish("Complete");
-    total_run_timer_->PrintMinutes();
+    LOG(INFO) << "Elapsed time: "
+              << FormatElapsedHms(total_run_timer_->ElapsedSeconds());
     return;
   }
 
@@ -792,16 +905,18 @@ void IncrementalPipeline::Run() {
            CheckReachedMaxRuntime();
   };
 
-  const size_t kNumInitRelaxations = 2;
   for (size_t i = 0; i < kNumInitRelaxations; ++i) {
     if (ShouldStop()) {
       break;
     }
 
-    progress_->SetStage("Relaxing initialization inlier threshold");
-    progress_->ClearBoundedWork();
     mapper_options.init_min_num_inliers /= 2;
     mapper.ResetInitializationStats();
+    progress_->BeginReconstructCall(
+        ++reconstruct_call,
+        max_reconstruct_calls,
+        StringPrintf(
+            "Relaxed init inliers %zu/%zu", i + 1, kNumInitRelaxations));
     if (Reconstruct(mapper,
                     mapper_options,
                     /*continue_reconstruction=*/false) == Status::STOP) {
@@ -812,10 +927,12 @@ void IncrementalPipeline::Run() {
       break;
     }
 
-    progress_->SetStage("Relaxing initialization triangulation threshold");
-    progress_->ClearBoundedWork();
     mapper_options.init_min_tri_angle /= 2;
     mapper.ResetInitializationStats();
+    progress_->BeginReconstructCall(
+        ++reconstruct_call,
+        max_reconstruct_calls,
+        StringPrintf("Relaxed init angle %zu/%zu", i + 1, kNumInitRelaxations));
     if (Reconstruct(mapper,
                     mapper_options,
                     /*continue_reconstruction=*/false) == Status::STOP) {
@@ -824,7 +941,8 @@ void IncrementalPipeline::Run() {
   }
 
   progress_->Finish("Complete");
-  total_run_timer_->PrintMinutes();
+  LOG(INFO) << "Elapsed time: "
+            << FormatElapsedHms(total_run_timer_->ElapsedSeconds());
 }
 
 IncrementalPipeline::Status IncrementalPipeline::InitializeReconstruction(
@@ -868,8 +986,7 @@ IncrementalPipeline::Status IncrementalPipeline::InitializeReconstruction(
   progress_->ClearBoundedWork();
   mapper.RegisterInitialImagePair(
       mapper_options, image_id1, image_id2, cam2_from_cam1);
-  progress_->MarkRegisteredFrame(*reconstruction.Image(image_id1).FramePtr());
-  progress_->MarkRegisteredFrame(*reconstruction.Image(image_id2).FramePtr());
+  progress_->SetCurrentModelRegisteredImageCount(reconstruction.NumRegImages());
 
   IncrementalTriangulator::Options tri_options = options_->Triangulation();
   tri_options.min_angle = mapper_options.init_min_tri_angle;
@@ -904,6 +1021,7 @@ IncrementalPipeline::Status IncrementalPipeline::InitializeReconstruction(
   reconstruction.Normalize();
   mapper.FilterPoints(mapper_options);
   mapper.FilterFrames(mapper_options);
+  progress_->SetCurrentModelRegisteredImageCount(reconstruction.NumRegImages());
 
   // Initial image pair failed to register.
   if (reconstruction.NumRegFrames() == 0 || reconstruction.NumPoints3D() == 0) {
@@ -958,9 +1076,8 @@ IncrementalPipeline::Status IncrementalPipeline::ReconstructSubModel(
                                                    const size_t total) {
     progress_->SetBoundedWork(label, current, total);
   });
-  for (const frame_t frame_id : reconstruction->RegFrameIds()) {
-    progress_->MarkRegisteredFrame(reconstruction->Frame(frame_id));
-  }
+  progress_->SetCurrentModelRegisteredImageCount(
+      reconstruction->NumRegImages());
 
   if (HasUnknownSensorFromRig(*reconstruction)) {
     progress_->SetStage("Unknown rig sensor pose");
@@ -1098,7 +1215,8 @@ IncrementalPipeline::Status IncrementalPipeline::ReconstructSubModel(
     if (reg_next_success) {
       const Image& image = reconstruction->Image(next_image_id);
       progress_->ClearBoundedWork();
-      progress_->MarkRegisteredFrame(*image.FramePtr());
+      progress_->SetCurrentModelRegisteredImageCount(
+          reconstruction->NumRegImages());
       size_t image_data_idx = 0;
       const size_t num_frame_images = CountFrameImages(*image.FramePtr());
       progress_->SetLoopStage(
@@ -1126,6 +1244,8 @@ IncrementalPipeline::Status IncrementalPipeline::ReconstructSubModel(
                                       ba_options,
                                       options_->Triangulation(),
                                       next_image_id);
+      progress_->SetCurrentModelRegisteredImageCount(
+          reconstruction->NumRegImages());
       progress_->ClearBoundedWork();
 
       if (CheckRunGlobalRefinement(
@@ -1224,6 +1344,7 @@ IncrementalPipeline::Status IncrementalPipeline::Reconstruct(
             : 0;
     std::shared_ptr<Reconstruction> reconstruction =
         reconstruction_manager_->Get(reconstruction_idx);
+    progress_->BeginCurrentModel(num_trials + 1);
 
     const Status status =
         ReconstructSubModel(mapper, mapper_options, reconstruction);
@@ -1297,6 +1418,7 @@ IncrementalPipeline::Status IncrementalPipeline::Reconstruct(
         // loop, if all images were registered.
         const size_t num_reg_images = reconstruction->NumRegImages();
         const size_t total_num_reg_images = mapper.NumTotalRegImages();
+        progress_->SetCurrentModelRegisteredImageCount(num_reg_images);
 
         // Always keep the first reconstruction, independent of size.
         if ((options_->multiple_models && reconstruction_manager_->Size() > 1 &&
