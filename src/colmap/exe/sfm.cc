@@ -44,6 +44,9 @@
 #include "colmap/util/misc.h"
 #include "colmap/util/opengl_utils.h"
 
+#include <algorithm>
+#include <cctype>
+
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 
@@ -76,6 +79,117 @@ void UpdateDatabasePosePriorsCovariance(
     pose_prior.position_covariance = covariance;
     database->UpdatePosePrior(pose_prior);
   }
+}
+
+double ComputePercent(const size_t count, const size_t total) {
+  if (total == 0) {
+    return 0.0;
+  }
+  return 100.0 * static_cast<double>(count) / static_cast<double>(total);
+}
+
+size_t FindBestReconstructionIdx(const ReconstructionManager& manager) {
+  THROW_CHECK_GT(manager.Size(), 0);
+
+  size_t best_idx = 0;
+  for (size_t idx = 1; idx < manager.Size(); ++idx) {
+    const auto& best = manager.Get(best_idx);
+    const auto& current = manager.Get(idx);
+    if (current->NumRegImages() > best->NumRegImages() ||
+        (current->NumRegImages() == best->NumRegImages() &&
+         current->NumPoints3D() > best->NumPoints3D())) {
+      best_idx = idx;
+    }
+  }
+  return best_idx;
+}
+
+void LogSparseReconstructionSummary(
+    const std::string& label,
+    const ReconstructionManager& reconstruction_manager,
+    const size_t total_num_images,
+    const std::filesystem::path& output_path) {
+  if (reconstruction_manager.Size() == 0) {
+    LOG(INFO) << label << " summary: FAILED - no sparse model was created.";
+    return;
+  }
+
+  const size_t best_idx = FindBestReconstructionIdx(reconstruction_manager);
+  const auto& reconstruction = reconstruction_manager.Get(best_idx);
+  const size_t num_reg_images = reconstruction->NumRegImages();
+  const size_t num_total_images = std::max(total_num_images, num_reg_images);
+  LOG(INFO) << StringPrintf(
+      "%s summary: SUCCESS - %zu model(s); best model %zu registered %.1f%% "
+      "of images (%zu/%zu), with %zu 3D points, %zu observations, %.3f px "
+      "mean reprojection error. Output: %s",
+      label.c_str(),
+      reconstruction_manager.Size(),
+      best_idx,
+      ComputePercent(num_reg_images, num_total_images),
+      num_reg_images,
+      num_total_images,
+      reconstruction->NumPoints3D(),
+      reconstruction->ComputeNumObservations(),
+      reconstruction->ComputeMeanReprojectionError(),
+      output_path.string().c_str());
+}
+
+void LogBundleAdjusterSummary(const Reconstruction& reconstruction,
+                              const double initial_mean_error,
+                              const std::filesystem::path& output_path) {
+  const size_t num_reg_images = reconstruction.NumRegImages();
+  const std::string status =
+      num_reg_images > 0 && reconstruction.NumPoints3D() > 0 ? "SUCCESS"
+                                                             : "NO DATA";
+  LOG(INFO) << StringPrintf(
+      "Bundle adjuster summary: %s - optimized %zu registered images, %zu 3D "
+      "points, %zu observations; mean reprojection error %.3f px -> %.3f px. "
+      "Output: %s",
+      status.c_str(),
+      num_reg_images,
+      reconstruction.NumPoints3D(),
+      reconstruction.ComputeNumObservations(),
+      initial_mean_error,
+      reconstruction.ComputeMeanReprojectionError(),
+      output_path.string().c_str());
+}
+
+bool IsIntegerPathName(const std::filesystem::path& path) {
+  const std::string name = path.filename().string();
+  return !name.empty() &&
+         std::all_of(name.begin(), name.end(), [](const unsigned char c) {
+           return std::isdigit(c);
+         });
+}
+
+void RetainBestReconstructionOnly(
+    const std::string& label,
+    const ReconstructionManager& reconstruction_manager,
+    const std::filesystem::path& output_path) {
+  if (reconstruction_manager.Size() == 0) {
+    LOG(INFO) << label
+              << " retain_best_model_only: skipped because no model exists.";
+    return;
+  }
+
+  const size_t best_idx = FindBestReconstructionIdx(reconstruction_manager);
+  for (const auto& entry : std::filesystem::directory_iterator(output_path)) {
+    if (IsIntegerPathName(entry.path())) {
+      std::filesystem::remove_all(entry.path());
+    }
+  }
+
+  const auto best_output_path = output_path / "0";
+  CreateDirIfNotExists(best_output_path);
+  reconstruction_manager.Get(best_idx)->Write(best_output_path);
+
+  LOG(INFO) << StringPrintf(
+      "%s retain_best_model_only: placed best model %zu into %s and removed "
+      "%zu other model(s).",
+      label.c_str(),
+      best_idx,
+      best_output_path.string().c_str(),
+      reconstruction_manager.Size() - 1);
 }
 
 }  // namespace
@@ -189,11 +303,15 @@ int RunBundleAdjuster(int argc, char** argv) {
 
   auto reconstruction = std::make_shared<Reconstruction>();
   reconstruction->Read(input_path);
+  reconstruction->UpdatePoint3DErrors();
+  const double initial_mean_error =
+      reconstruction->ComputeMeanReprojectionError();
 
   BundleAdjustmentController ba_controller(options, reconstruction);
   ba_controller.Run();
 
   reconstruction->Write(output_path);
+  LogBundleAdjusterSummary(*reconstruction, initial_mean_error, output_path);
 
   return EXIT_SUCCESS;
 }
@@ -241,6 +359,7 @@ bool RunIncrementalMapperImpl(
   mapper_options->image_path = image_path;
 
   auto database = Database::Open(database_path);
+  const size_t total_num_images = database->NumImages();
 
   IncrementalPipeline mapper(mapper_options, database, reconstruction_manager);
 
@@ -277,6 +396,8 @@ bool RunIncrementalMapperImpl(
 
   if (reconstruction_manager->Size() == 0) {
     LOG(ERROR) << "Failed to create any sparse model";
+    LogSparseReconstructionSummary(
+        "Mapper", *reconstruction_manager, total_num_images, output_path);
     return false;
   }
 
@@ -311,18 +432,23 @@ bool RunIncrementalMapperImpl(
     reconstruction->Write(output_path);
   }
 
+  LogSparseReconstructionSummary(
+      "Mapper", *reconstruction_manager, total_num_images, output_path);
+
   return true;
 }
 
 int RunMapper(int argc, char** argv) {
   std::filesystem::path input_path;
   std::filesystem::path output_path;
+  bool retain_best_model_only = false;
 
   OptionManager options;
   options.AddDatabaseOptions();
   options.AddImageOptions();
   options.AddDefaultOption("input_path", &input_path);
   options.AddRequiredOption("output_path", &output_path);
+  options.AddDefaultOption("retain_best_model_only", &retain_best_model_only);
   options.AddMapperOptions();
   if (!options.Parse(argc, argv)) {
     return EXIT_FAILURE;
@@ -357,6 +483,17 @@ int RunMapper(int argc, char** argv) {
     }
   }
 
+  if (retain_best_model_only) {
+    if (!input_path.empty()) {
+      LOG(INFO) << "Mapper retain_best_model_only: skipped because continuing "
+                   "an input model writes one direct output model.";
+    } else {
+      RetainBestReconstructionOnly(
+          "Mapper", *reconstruction_manager, output_path);
+      options.Write(output_path / "0" / "project.ini");
+    }
+  }
+
   return EXIT_SUCCESS;
 }
 
@@ -368,28 +505,37 @@ bool RunGlobalMapperImpl(
     std::shared_ptr<ReconstructionManager>& reconstruction_manager) {
   GlobalPipelineOptions options = *mapper_options;
   options.image_path = image_path;
+  auto database = Database::Open(database_path);
+  const size_t total_num_images = database->NumImages();
 
-  GlobalPipeline global_mapper(std::move(options),
-                               Database::Open(database_path),
-                               reconstruction_manager);
+  GlobalPipeline global_mapper(
+      std::move(options), database, reconstruction_manager);
   global_mapper.Run();
 
   if (reconstruction_manager->Size() == 0) {
     LOG(ERROR) << "Failed to create sparse model";
+    LogSparseReconstructionSummary("Global mapper",
+                                   *reconstruction_manager,
+                                   total_num_images,
+                                   output_path);
     return false;
   }
 
   reconstruction_manager->Write(output_path);
+  LogSparseReconstructionSummary(
+      "Global mapper", *reconstruction_manager, total_num_images, output_path);
   return true;
 }
 
 int RunGlobalMapper(int argc, char** argv) {
   std::filesystem::path output_path;
+  bool retain_best_model_only = false;
 
   OptionManager options;
   options.AddDatabaseOptions();
   options.AddImageOptions();
   options.AddRequiredOption("output_path", &output_path);
+  options.AddDefaultOption("retain_best_model_only", &retain_best_model_only);
   options.AddGlobalMapperOptions();
   if (!options.Parse(argc, argv)) {
     return EXIT_FAILURE;
@@ -410,6 +556,10 @@ int RunGlobalMapper(int argc, char** argv) {
   }
 
   options.Write(output_path / "project.ini");
+  if (retain_best_model_only) {
+    RetainBestReconstructionOnly(
+        "Global mapper", *reconstruction_manager, output_path);
+  }
   return EXIT_SUCCESS;
 }
 
