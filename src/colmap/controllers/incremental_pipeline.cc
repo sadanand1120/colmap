@@ -105,6 +105,21 @@ class MapperProgress {
     SetStage(FormatLoopStage(stage_index, std::move(stage)));
   }
 
+  void SetModelProgress(const size_t current,
+                        const size_t total,
+                        const size_t kept,
+                        const size_t max_kept,
+                        std::string stage) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    has_model_progress_ = true;
+    model_current_ = std::min(current, total);
+    model_total_ = std::max<size_t>(total, 1);
+    model_kept_ = kept;
+    model_max_kept_ = std::max<size_t>(max_kept, 1);
+    model_stage_ = std::move(stage);
+    RenderLocked(true);
+  }
+
   void SetBoundedWork(std::string label,
                       const size_t current,
                       const size_t total,
@@ -290,26 +305,43 @@ class MapperProgress {
     }
 
     const size_t current = registered_image_ids_.size();
+    std::ostringstream model_line;
+    if (has_model_progress_) {
+      model_line << "Model attempts ["
+                 << MakeBar(model_current_, model_total_, 28) << "] "
+                 << model_current_ << "/" << model_total_ << " "
+                 << FormatPercent(model_current_, model_total_) << " | kept "
+                 << model_kept_ << "/" << model_max_kept_ << " | "
+                 << model_stage_ << " | " << FormatElapsed();
+    }
+
     std::ostringstream line1;
-    line1 << "Unique registered images [" << MakeBar(current, total_images_, 28)
-          << "] " << current << "/" << total_images_ << " "
-          << FormatPercent(current, total_images_) << " | " << stage_ << " | "
-          << FormatElapsed();
+    line1 << (has_model_progress_ ? "  " : "") << "Unique registered images ["
+          << MakeBar(current, total_images_, 28) << "] " << current << "/"
+          << total_images_ << " " << FormatPercent(current, total_images_)
+          << " | " << stage_ << " | " << FormatElapsed();
 
     std::ostringstream line2;
     if (has_bounded_work_) {
-      line2 << "  " << bounded_label_ << " ["
+      line2 << (has_model_progress_ ? "    " : "  ") << bounded_label_ << " ["
             << MakeBar(bounded_current_, bounded_total_, 24) << "] "
             << bounded_current_ << "/" << bounded_total_ << " "
             << FormatPercent(bounded_current_, bounded_total_);
     }
 
     ClearLocked();
-    Write(line1.str());
-    rendered_lines_ = 1;
+    if (has_model_progress_) {
+      Write(model_line.str());
+      rendered_lines_ = 1;
+      Write("\n" + line1.str());
+      rendered_lines_ = 2;
+    } else {
+      Write(line1.str());
+      rendered_lines_ = 1;
+    }
     if (has_bounded_work_) {
       Write("\n" + line2.str());
-      rendered_lines_ = 2;
+      ++rendered_lines_;
     }
     last_render_at_ = now;
   }
@@ -328,6 +360,12 @@ class MapperProgress {
   size_t rendered_lines_;
   std::chrono::steady_clock::time_point last_render_at_ =
       std::chrono::steady_clock::time_point::min();
+  bool has_model_progress_ = false;
+  size_t model_current_ = 0;
+  size_t model_total_ = 1;
+  size_t model_kept_ = 0;
+  size_t model_max_kept_ = 1;
+  std::string model_stage_ = "Starting";
   std::string stage_ = "Starting";
   std::unordered_set<image_t> registered_image_ids_;
   bool has_bounded_work_ = false;
@@ -1166,13 +1204,19 @@ IncrementalPipeline::Status IncrementalPipeline::Reconstruct(
     IncrementalMapper& mapper,
     const IncrementalMapper::Options& mapper_options,
     bool continue_reconstruction) {
+  const size_t max_kept_models =
+      options_->multiple_models ? static_cast<size_t>(options_->max_num_models)
+                                : 1;
   for (int num_trials = 0; num_trials < options_->init_num_trials;
        ++num_trials) {
     if (CheckIfStopped() || CheckReachedMaxRuntime()) {
       return Status::STOP;
     }
-    progress_->SetBoundedWork(
-        "Initialization trials", num_trials + 1, options_->init_num_trials);
+    progress_->SetModelProgress(num_trials + 1,
+                                options_->init_num_trials,
+                                reconstruction_manager_->Size(),
+                                max_kept_models,
+                                "Searching for next model");
 
     const size_t reconstruction_idx =
         (!continue_reconstruction || num_trials > 0)
@@ -1195,6 +1239,11 @@ IncrementalPipeline::Status IncrementalPipeline::Reconstruct(
       }
 
       case Status::UNKNOWN_SENSOR_FROM_RIG: {
+        progress_->SetModelProgress(num_trials + 1,
+                                    options_->init_num_trials,
+                                    reconstruction_manager_->Size() - 1,
+                                    max_kept_models,
+                                    "Discarding current model");
         progress_->ClearForLog();
         LOG(ERROR)
             << "Discarding reconstruction due to unknown sensor_from_rig "
@@ -1211,6 +1260,11 @@ IncrementalPipeline::Status IncrementalPipeline::Reconstruct(
       }
 
       case Status::BAD_INITIAL_PAIR: {
+        progress_->SetModelProgress(num_trials + 1,
+                                    options_->init_num_trials,
+                                    reconstruction_manager_->Size() - 1,
+                                    max_kept_models,
+                                    "Discarding current model");
         progress_->SetStage("Discarding reconstruction: bad initial pair");
         progress_->ClearBoundedWork();
         mapper.EndReconstruction(/*discard=*/true);
@@ -1221,6 +1275,11 @@ IncrementalPipeline::Status IncrementalPipeline::Reconstruct(
       }
 
       case Status::NO_INITIAL_PAIR: {
+        progress_->SetModelProgress(num_trials + 1,
+                                    options_->init_num_trials,
+                                    reconstruction_manager_->Size() - 1,
+                                    max_kept_models,
+                                    "No initial pair for current model");
         progress_->SetStage("Discarding reconstruction: no initial pair");
         progress_->ClearBoundedWork();
         mapper.EndReconstruction(/*discard=*/true);
@@ -1243,12 +1302,22 @@ IncrementalPipeline::Status IncrementalPipeline::Reconstruct(
         if ((options_->multiple_models && reconstruction_manager_->Size() > 1 &&
              num_reg_images < static_cast<size_t>(options_->min_model_size)) ||
             num_reg_images == 0) {
+          progress_->SetModelProgress(num_trials + 1,
+                                      options_->init_num_trials,
+                                      reconstruction_manager_->Size() - 1,
+                                      max_kept_models,
+                                      "Discarding current model");
           progress_->SetStage("Discarding reconstruction: insufficient size");
           progress_->ClearBoundedWork();
           mapper.EndReconstruction(/*discard=*/true);
           reconstruction_manager_->Delete(reconstruction_idx);
         } else {
           reconstruction->UpdatePoint3DErrors();
+          progress_->SetModelProgress(num_trials + 1,
+                                      options_->init_num_trials,
+                                      reconstruction_manager_->Size(),
+                                      max_kept_models,
+                                      "Keeping current model");
           progress_->SetStage("Keeping successful reconstruction");
           progress_->ClearBoundedWork();
           mapper.EndReconstruction(/*discard=*/false);
