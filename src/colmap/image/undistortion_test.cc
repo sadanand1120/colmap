@@ -231,6 +231,18 @@ TEST(UndistortReconstruction, Nominal) {
   }
 }
 
+TEST(UndistortReconstruction, ConvertsUndistortedOpenCVCameraToPinhole) {
+  Reconstruction reconstruction;
+
+  Camera camera = Camera::CreateFromModelName(1, "OPENCV", 640, 480, 500);
+  reconstruction.AddCamera(camera);
+
+  UndistortCameraOptions options;
+  UndistortReconstruction(options, &reconstruction);
+
+  EXPECT_EQ(reconstruction.Camera(1).ModelName(), "PINHOLE");
+}
+
 TEST(RectifyStereoCameras, Nominal) {
   Camera camera1;
   camera1 = Camera::CreateFromModelName(1, "PINHOLE", 1, 1, 1);

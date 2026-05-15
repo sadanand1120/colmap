@@ -237,8 +237,8 @@ bool COLMAPUndistorter::Undistort(const image_t image_id) const {
   // scaling is needed
   if (camera.IsUndistorted() && camera_options_.max_image_size < 0 &&
       ExistsFile(input_image_path)) {
-    LOG(INFO) << "Copying already distorted image to location: "
-              << output_image_path;
+    VLOG(1) << "Copying already undistorted image to location: "
+            << output_image_path;
     FileCopy(input_image_path, output_image_path, options_.copy_type);
     return true;
   }

@@ -110,7 +110,10 @@ void LogSparseReconstructionSummary(
     const size_t total_num_images,
     const std::filesystem::path& output_path) {
   if (reconstruction_manager.Size() == 0) {
-    LOG(INFO) << label << " summary: FAILED - no sparse model was created.";
+    LOG(INFO) << label
+              << " Summary: Status: Failed - No Sparse Model Created | "
+                 "Kept-Model Count: 0 | Output: "
+              << output_path;
     return;
   }
 
@@ -119,15 +122,16 @@ void LogSparseReconstructionSummary(
   const size_t num_reg_images = reconstruction->NumRegImages();
   const size_t num_total_images = std::max(total_num_images, num_reg_images);
   LOG(INFO) << StringPrintf(
-      "%s summary: SUCCESS - %zu model(s); best model %zu registered %.1f%% "
-      "of images (%zu/%zu), with %zu 3D points, %zu observations, %.3f px "
-      "mean reprojection error. Output: %s",
+      "%s Summary: Status: Model Created | Kept-Model Count: %zu | Best "
+      "Kept-Model Index: %zu | Registered Images: %zu/%zu (%.1f%%) | 3D "
+      "Points: %zu | Observations: %zu | Mean Reprojection Error: %.3f px | "
+      "Output: %s",
       label.c_str(),
       reconstruction_manager.Size(),
       best_idx,
-      ComputePercent(num_reg_images, num_total_images),
       num_reg_images,
       num_total_images,
+      ComputePercent(num_reg_images, num_total_images),
       reconstruction->NumPoints3D(),
       reconstruction->ComputeNumObservations(),
       reconstruction->ComputeMeanReprojectionError(),
@@ -139,12 +143,12 @@ void LogBundleAdjusterSummary(const Reconstruction& reconstruction,
                               const std::filesystem::path& output_path) {
   const size_t num_reg_images = reconstruction.NumRegImages();
   const std::string status =
-      num_reg_images > 0 && reconstruction.NumPoints3D() > 0 ? "SUCCESS"
-                                                             : "NO DATA";
+      num_reg_images > 0 && reconstruction.NumPoints3D() > 0 ? "Optimized"
+                                                             : "No Data";
   LOG(INFO) << StringPrintf(
-      "Bundle adjuster summary: %s - optimized %zu registered images, %zu 3D "
-      "points, %zu observations; mean reprojection error %.3f px -> %.3f px. "
-      "Output: %s",
+      "Bundle Adjuster Summary: Status: %s | Registered Images: %zu | 3D "
+      "Points: %zu | Observations: %zu | Mean Reprojection Error: %.3f px -> "
+      "%.3f px | Output: %s",
       status.c_str(),
       num_reg_images,
       reconstruction.NumPoints3D(),
@@ -168,7 +172,8 @@ void RetainBestReconstructionOnly(
     const std::filesystem::path& output_path) {
   if (reconstruction_manager.Size() == 0) {
     LOG(INFO) << label
-              << " retain_best_model_only: skipped because no model exists.";
+              << " retain_best_model_only: Skipped | Reason: No sparse model "
+                 "exists.";
     return;
   }
 
@@ -184,8 +189,8 @@ void RetainBestReconstructionOnly(
   reconstruction_manager.Get(best_idx)->Write(best_output_path);
 
   LOG(INFO) << StringPrintf(
-      "%s retain_best_model_only: placed best model %zu into %s and removed "
-      "%zu other model(s).",
+      "%s retain_best_model_only: Best Kept-Model Index: %zu -> Output Model "
+      "Index: 0 (%s) | Removed Other Kept Models: %zu.",
       label.c_str(),
       best_idx,
       best_output_path.string().c_str(),
@@ -395,7 +400,7 @@ bool RunIncrementalMapperImpl(
   mapper.Run();
 
   if (reconstruction_manager->Size() == 0) {
-    LOG(ERROR) << "Failed to create any sparse model";
+    LOG(ERROR) << "Mapper: Failed to create any sparse model.";
     LogSparseReconstructionSummary(
         "Mapper", *reconstruction_manager, total_num_images, output_path);
     return false;
@@ -485,8 +490,9 @@ int RunMapper(int argc, char** argv) {
 
   if (retain_best_model_only) {
     if (!input_path.empty()) {
-      LOG(INFO) << "Mapper retain_best_model_only: skipped because continuing "
-                   "an input model writes one direct output model.";
+      LOG(INFO)
+          << "Mapper retain_best_model_only: Skipped | Reason: continuing an "
+             "input model writes one direct output model.";
     } else {
       RetainBestReconstructionOnly(
           "Mapper", *reconstruction_manager, output_path);
@@ -513,8 +519,8 @@ bool RunGlobalMapperImpl(
   global_mapper.Run();
 
   if (reconstruction_manager->Size() == 0) {
-    LOG(ERROR) << "Failed to create sparse model";
-    LogSparseReconstructionSummary("Global mapper",
+    LOG(ERROR) << "Global Mapper: Failed to create sparse model.";
+    LogSparseReconstructionSummary("Global Mapper",
                                    *reconstruction_manager,
                                    total_num_images,
                                    output_path);
@@ -523,7 +529,7 @@ bool RunGlobalMapperImpl(
 
   reconstruction_manager->Write(output_path);
   LogSparseReconstructionSummary(
-      "Global mapper", *reconstruction_manager, total_num_images, output_path);
+      "Global Mapper", *reconstruction_manager, total_num_images, output_path);
   return true;
 }
 
@@ -558,7 +564,7 @@ int RunGlobalMapper(int argc, char** argv) {
   options.Write(output_path / "project.ini");
   if (retain_best_model_only) {
     RetainBestReconstructionOnly(
-        "Global mapper", *reconstruction_manager, output_path);
+        "Global Mapper", *reconstruction_manager, output_path);
   }
   return EXIT_SUCCESS;
 }

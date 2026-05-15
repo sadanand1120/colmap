@@ -259,9 +259,9 @@ void FilterEdgesByRelativeRotation(PoseGraph& pose_graph,
     }
   }
 
-  LOG(INFO) << "Marked " << num_invalid
-            << " image pairs as invalid with relative rotation error > "
-            << max_angle_deg << " degrees";
+  VLOG(1) << "Marked " << num_invalid
+          << " image pairs as invalid with relative rotation error > "
+          << max_angle_deg << " degrees";
 }
 
 }  // namespace

@@ -253,9 +253,6 @@ void UndistortReconstruction(const UndistortCameraOptions& options,
   const std::unordered_map<camera_t, Camera> distorted_cameras =
       reconstruction->Cameras();
   for (const auto& camera : distorted_cameras) {
-    if (camera.second.IsUndistorted()) {
-      continue;
-    }
     reconstruction->Camera(camera.first) =
         UndistortCamera(options, camera.second);
   }
