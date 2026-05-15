@@ -48,6 +48,7 @@
 #include <vector>
 
 #ifndef _WIN32
+#include <sys/ioctl.h>
 #include <unistd.h>
 #endif
 
@@ -254,8 +255,8 @@ class MapperProgress {
                            elapsed.c_str()));
       } else {
         Write(StringPrintf(
-            "Mapper: %s | Final Best: Reconstruct Call=%zu, Model-Try=%zu, "
-            "Registered Images=%zu/%zu | Total Time=%s\n",
+            "Mapper: %s | Final Best: Reconstruct=%zu, Model-Try=%zu, "
+            "Images=%zu/%zu | Total %s\n",
             stage.c_str(),
             best_reconstruct_call,
             best_model_trial,
@@ -371,56 +372,57 @@ class MapperProgress {
     std::vector<std::string> lines;
     if (has_reconstruct_progress_) {
       std::ostringstream reconstruct_line;
-      reconstruct_line << "Reconstruct Calls ["
-                       << MakeBar(reconstruct_current_, reconstruct_total_, 28)
-                       << "] " << reconstruct_current_ << "/"
-                       << reconstruct_total_ << " "
+      reconstruct_line << "Reconstruct Calls " << reconstruct_current_ << "/"
+                       << reconstruct_total_ << " ["
+                       << MakeBar(reconstruct_current_, reconstruct_total_, 20)
+                       << "] "
                        << FormatPercent(reconstruct_current_,
                                         reconstruct_total_)
-                       << " | Stage: " << reconstruct_stage_
-                       << " | Total Time: " << FormatElapsed(total_timer_);
+                       << " | " << reconstruct_stage_ << " | Total "
+                       << FormatElapsed(total_timer_);
       lines.push_back(reconstruct_line.str());
     }
 
     if (has_model_progress_) {
       std::ostringstream model_line;
-      model_line << "Model Attempts ["
-                 << MakeBar(model_current_, model_total_, 28) << "] "
-                 << model_current_ << "/" << model_total_ << " "
-                 << FormatPercent(model_current_, model_total_)
-                 << " | Kept-Model Count: " << model_kept_ << "/"
-                 << model_max_kept_ << " | Best Kept This Reconstruct: ";
-      if (best_model_trial_ == 0) {
-        model_line << "None";
-      } else {
-        model_line << "Model-Try=" << best_model_trial_
-                   << ", Registered Images="
-                   << best_model_num_registered_images_ << "/" << total_images_;
-      }
-      model_line << " | Stage: " << model_stage_ << " | Reconstruct Time: "
+      model_line << "Model Attempts " << model_current_ << "/" << model_total_
+                 << " [" << MakeBar(model_current_, model_total_, 20) << "] "
+                 << FormatPercent(model_current_, model_total_) << " | Kept "
+                 << model_kept_ << "/" << model_max_kept_ << " | Reconstruct "
                  << FormatElapsed(reconstruct_timer_);
-      lines.push_back((has_reconstruct_progress_ ? "  " : "") +
-                      model_line.str());
+      const std::string model_indent = has_reconstruct_progress_ ? "  " : "";
+      lines.push_back(model_indent + model_line.str());
+
+      if (best_model_trial_ == 0) {
+        lines.push_back(model_indent + "Best Kept This Reconstruct: None");
+      } else {
+        lines.push_back(
+            model_indent +
+            StringPrintf("Best Kept This Reconstruct: Model-Try=%zu | "
+                         "Registered Images=%zu/%zu",
+                         best_model_trial_,
+                         best_model_num_registered_images_,
+                         total_images_));
+      }
+      lines.push_back(model_indent + "Model Stage: " + model_stage_);
     }
 
     if (has_current_model_progress_) {
+      const std::string current_model_indent = has_model_progress_ ? "    "
+                                               : has_reconstruct_progress_
+                                                   ? "  "
+                                                   : "";
       std::ostringstream current_model_line;
       current_model_line
-          << "Current Model | Model-Try=" << current_model_trial_
-          << " | Registered Images ["
-          << MakeBar(current_model_num_registered_images_, total_images_, 28)
-          << "] " << current_model_num_registered_images_ << "/"
-          << total_images_ << " "
+          << "Current Model: Try=" << current_model_trial_ << " | Images "
+          << current_model_num_registered_images_ << "/" << total_images_
+          << " ["
+          << MakeBar(current_model_num_registered_images_, total_images_, 20)
+          << "] "
           << FormatPercent(current_model_num_registered_images_, total_images_)
-          << " | Stage: " << stage_
-          << " | Model Time: " << FormatElapsed(current_model_timer_);
-      if (has_model_progress_) {
-        lines.push_back("    " + current_model_line.str());
-      } else if (has_reconstruct_progress_) {
-        lines.push_back("  " + current_model_line.str());
-      } else {
-        lines.push_back(current_model_line.str());
-      }
+          << " | Model " << FormatElapsed(current_model_timer_);
+      lines.push_back(current_model_indent + current_model_line.str());
+      lines.push_back(current_model_indent + "Stage: " + stage_);
     } else if (!has_reconstruct_progress_ && !has_model_progress_) {
       lines.push_back("Mapper | " + stage_ + " | " +
                       FormatElapsed(total_timer_));
@@ -435,10 +437,10 @@ class MapperProgress {
       } else if (has_reconstruct_progress_) {
         bounded_line << "  ";
       }
-      bounded_line << bounded_label_ << " ["
-                   << MakeBar(bounded_current_, bounded_total_, 24) << "] "
-                   << bounded_current_ << "/" << bounded_total_ << " "
-                   << FormatPercent(bounded_current_, bounded_total_);
+      bounded_line << bounded_current_ << "/" << bounded_total_ << " ["
+                   << MakeBar(bounded_current_, bounded_total_, 20) << "] "
+                   << FormatPercent(bounded_current_, bounded_total_) << " | "
+                   << bounded_label_;
       lines.push_back(bounded_line.str());
     }
 
@@ -447,10 +449,29 @@ class MapperProgress {
       if (i > 0) {
         Write("\n");
       }
-      Write(lines[i]);
+      Write(FitLine(lines[i]));
     }
     rendered_lines_ = lines.size();
     last_render_at_ = now;
+  }
+
+  size_t TerminalColumns() const {
+#ifndef _WIN32
+    struct winsize size;
+    if (output_fd_ != -1 && ioctl(output_fd_, TIOCGWINSZ, &size) == 0 &&
+        size.ws_col > 0) {
+      return std::max<size_t>(size.ws_col, 20);
+    }
+#endif
+    return 80;
+  }
+
+  std::string FitLine(const std::string& line) const {
+    const size_t columns = TerminalColumns();
+    if (columns <= 1 || line.size() < columns) {
+      return line;
+    }
+    return line.substr(0, columns - 1);
   }
 
   static constexpr auto kMinRenderInterval = std::chrono::milliseconds(120);
@@ -1538,9 +1559,12 @@ void IncrementalPipeline::RegisterCallbacks() {
 bool IncrementalPipeline::CheckReachedMaxRuntime() const {
   if (options_->max_runtime_seconds > 0 &&
       total_run_timer_->ElapsedSeconds() > options_->max_runtime_seconds) {
-    progress_->ClearForLog();
-    LOG(INFO) << "Reached maximum runtime of " << options_->max_runtime_seconds
-              << " seconds.";
+    if (!reached_max_runtime_logged_) {
+      progress_->ClearForLog();
+      LOG(INFO) << "Reached maximum runtime of "
+                << options_->max_runtime_seconds << " seconds.";
+      reached_max_runtime_logged_ = true;
+    }
     return true;
   }
   return false;

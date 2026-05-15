@@ -399,6 +399,17 @@ bool RunIncrementalMapperImpl(
 
   mapper.Run();
 
+  if (!exists_input_reconstruction) {
+    while (prev_num_reconstructions < reconstruction_manager->Size()) {
+      const auto reconstruction_path =
+          output_path / std::to_string(prev_num_reconstructions);
+      CreateDirIfNotExists(reconstruction_path);
+      reconstruction_manager->Get(prev_num_reconstructions)
+          ->Write(reconstruction_path);
+      ++prev_num_reconstructions;
+    }
+  }
+
   if (reconstruction_manager->Size() == 0) {
     LOG(ERROR) << "Mapper: Failed to create any sparse model.";
     LogSparseReconstructionSummary(

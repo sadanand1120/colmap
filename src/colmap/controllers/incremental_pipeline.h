@@ -277,6 +277,7 @@ class IncrementalPipeline : public BaseController {
   std::shared_ptr<class DatabaseCache> database_cache_;
   std::shared_ptr<Timer> total_run_timer_;
   std::unique_ptr<MapperProgress> progress_;
+  mutable bool reached_max_runtime_logged_ = false;
 };
 
 }  // namespace colmap

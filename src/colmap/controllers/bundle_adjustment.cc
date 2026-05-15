@@ -40,6 +40,7 @@
 #include <mutex>
 
 #ifndef _WIN32
+#include <sys/ioctl.h>
 #include <unistd.h>
 #endif
 
@@ -130,14 +131,14 @@ class BundleAdjustmentProgressCallback : public ceres::IterationCallback {
     const int current = std::min(current_iteration_, max_num_iterations_);
     const double percent = 100.0 * current / max_num_iterations_;
     const std::string line =
-        StringPrintf("\rBundle adjustment: [%s] %d/%d iterations %5.1f%% %.1fs",
-                     MakeBar(current, max_num_iterations_, 28).c_str(),
-                     current,
-                     max_num_iterations_,
-                     percent,
-                     ElapsedSeconds());
-    Write(line);
-    rendered_width_ = std::max(rendered_width_, line.size() - 1);
+        FitLine(StringPrintf("Bundle adjustment: %d/%d [%s] %5.1f%% %.1fs",
+                             current,
+                             max_num_iterations_,
+                             MakeBar(current, max_num_iterations_, 20).c_str(),
+                             percent,
+                             ElapsedSeconds()));
+    Write("\r" + line);
+    rendered_width_ = std::max(rendered_width_, line.size());
   }
 
   void ClearLocked() {
@@ -155,6 +156,25 @@ class BundleAdjustmentProgressCallback : public ceres::IterationCallback {
       static_cast<void>(num_written);
     }
 #endif
+  }
+
+  size_t TerminalColumns() const {
+#ifndef _WIN32
+    struct winsize size;
+    if (output_fd_ != -1 && ioctl(output_fd_, TIOCGWINSZ, &size) == 0 &&
+        size.ws_col > 0) {
+      return std::max<size_t>(size.ws_col, 20);
+    }
+#endif
+    return 80;
+  }
+
+  std::string FitLine(const std::string& line) const {
+    const size_t columns = TerminalColumns();
+    if (columns <= 1 || line.size() < columns) {
+      return line;
+    }
+    return line.substr(0, columns - 1);
   }
 
   BaseController* controller_;

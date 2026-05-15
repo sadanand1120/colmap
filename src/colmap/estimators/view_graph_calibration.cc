@@ -49,6 +49,7 @@
 #include <unordered_set>
 
 #ifndef _WIN32
+#include <sys/ioctl.h>
 #include <unistd.h>
 #endif
 
@@ -237,28 +238,46 @@ class ViewGraphCalibrationProgress {
     }
 
     std::ostringstream line1;
-    line1 << "View graph calibrator ["
-          << MakeBar(stage_index_, total_stages_, 28) << "] " << stage_index_
-          << "/" << total_stages_ << " "
+    line1 << "View graph calibrator " << stage_index_ << "/" << total_stages_
+          << " [" << MakeBar(stage_index_, total_stages_, 20) << "] "
           << FormatPercent(stage_index_, total_stages_) << " | " << stage_
           << " | " << FormatElapsed();
 
     std::ostringstream line2;
     if (has_bounded_work_) {
-      line2 << "  " << bounded_label_ << " ["
-            << MakeBar(bounded_current_, bounded_total_, 24) << "] "
-            << bounded_current_ << "/" << bounded_total_ << " "
-            << FormatPercent(bounded_current_, bounded_total_);
+      line2 << "  " << bounded_current_ << "/" << bounded_total_ << " ["
+            << MakeBar(bounded_current_, bounded_total_, 20) << "] "
+            << FormatPercent(bounded_current_, bounded_total_) << " | "
+            << bounded_label_;
     }
 
     ClearLocked();
-    Write(line1.str());
+    Write(FitLine(line1.str()));
     rendered_lines_ = 1;
     if (has_bounded_work_) {
-      Write("\n" + line2.str());
+      Write("\n" + FitLine(line2.str()));
       rendered_lines_ = 2;
     }
     last_render_at_ = now;
+  }
+
+  size_t TerminalColumns() const {
+#ifndef _WIN32
+    struct winsize size;
+    if (output_fd_ != -1 && ioctl(output_fd_, TIOCGWINSZ, &size) == 0 &&
+        size.ws_col > 0) {
+      return std::max<size_t>(size.ws_col, 20);
+    }
+#endif
+    return 80;
+  }
+
+  std::string FitLine(const std::string& line) const {
+    const size_t columns = TerminalColumns();
+    if (columns <= 1 || line.size() < columns) {
+      return line;
+    }
+    return line.substr(0, columns - 1);
   }
 
   static constexpr auto kMinRenderInterval = std::chrono::milliseconds(120);
