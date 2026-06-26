@@ -68,6 +68,9 @@ struct FeatureExtractionOptions : public FeatureExtractionTypeOptions {
   // Number of threads for feature extraction.
   int num_threads = -1;
 
+  // Number of GPU worker threads to launch per selected GPU.
+  int num_gpu_threads_per_gpu = 1;
+
   // Whether to use the GPU for feature extraction.
 #ifdef COLMAP_GPU_ENABLED
   bool use_gpu = true;

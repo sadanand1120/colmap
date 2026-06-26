@@ -15,6 +15,15 @@ Eigen::Vector3d RandVector3d(double low, double high) {
                          RandomUniformReal(low, high));
 }
 
+void ReportProgress(const GlobalPositionerOptions::ProgressCallback& progress,
+                    const std::string& label,
+                    const size_t current,
+                    const size_t total) {
+  if (progress && total > 1) {
+    progress(label, current, total);
+  }
+}
+
 }  // namespace
 
 GlobalPositioner::GlobalPositioner(const GlobalPositionerOptions& options)
@@ -35,7 +44,7 @@ bool GlobalPositioner::Solve(const PoseGraph& pose_graph,
     return false;
   }
 
-  LOG(INFO) << "Setting up the global positioner problem";
+  VLOG(1) << "Setting up the global positioner problem";
 
   // Setup the problem.
   SetupProblem(pose_graph, reconstruction);
@@ -55,18 +64,27 @@ bool GlobalPositioner::Solve(const PoseGraph& pose_graph,
   // constant if desired
   ParameterizeVariables(reconstruction);
 
-  LOG(INFO) << "Solving the global positioner problem";
+  VLOG(1) << "Solving the global positioner problem";
 
   ceres::Solver::Summary summary;
   options_.solver_options.num_threads =
       GetEffectiveNumThreads(options_.solver_options.num_threads);
   options_.solver_options.minimizer_progress_to_stdout = VLOG_IS_ON(2);
+  std::unique_ptr<ceres::IterationCallback> progress_callback;
+  if (options_.progress_callback_factory &&
+      !options_.solver_options.minimizer_progress_to_stdout) {
+    progress_callback =
+        options_.progress_callback_factory(options_.solver_options);
+    if (progress_callback) {
+      options_.solver_options.callbacks.push_back(progress_callback.get());
+    }
+  }
   ceres::Solve(options_.solver_options, problem_.get(), &summary);
 
   if (VLOG_IS_ON(2)) {
     LOG(INFO) << summary.FullReport();
   } else {
-    LOG(INFO) << summary.BriefReport();
+    VLOG(1) << summary.BriefReport();
   }
 
   ConvertBackResults(reconstruction);
@@ -89,7 +107,12 @@ void GlobalPositioner::SetupProblem(const PoseGraph& pose_graph,
   // smaller.
   scales_.clear();
   size_t total_observations = 0;
+  size_t point3D_idx = 0;
   for (const auto& [point3D_id, point3D] : reconstruction.Points3D()) {
+    ReportProgress(options_.progress_callback,
+                   "Counting global positioning observations",
+                   ++point3D_idx,
+                   reconstruction.NumPoints3D());
     total_observations += point3D.track.Length();
   }
   scales_.reserve(total_observations);
@@ -145,7 +168,12 @@ void GlobalPositioner::AddPointToCameraConstraints(
       loss_function_.get(), 0.5, ceres::DO_NOT_TAKE_OWNERSHIP);
   loss_function_ptcam_calibrated_ = loss_function_;
 
+  size_t point3D_idx = 0;
   for (const auto& [point3D_id, point3D] : reconstruction.Points3D()) {
+    ReportProgress(options_.progress_callback,
+                   "Adding global positioning constraints",
+                   ++point3D_idx,
+                   reconstruction.NumPoints3D());
     if (point3D.track.Length() <
         static_cast<size_t>(options_.min_num_view_per_track)) {
       continue;

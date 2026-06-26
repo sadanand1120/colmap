@@ -4,6 +4,8 @@
 #include "colmap/scene/pose_graph.h"
 #include "colmap/scene/reconstruction.h"
 
+#include <functional>
+#include <string>
 #include <unordered_set>
 #include <vector>
 
@@ -15,6 +17,9 @@
 namespace colmap {
 
 struct RotationEstimatorOptions {
+  using ProgressCallback =
+      std::function<void(const std::string&, size_t, size_t)>;
+
   // PRNG seed for stochastic methods during rotation averaging.
   // If -1 (default), the seed is derived from the current time
   // (non-deterministic). If >= 0, the rotation averaging is deterministic with
@@ -79,6 +84,9 @@ struct RotationEstimatorOptions {
   // When false, treat each non-ref sensor's cam_from_rig rotation as a
   // pre-calibrated constant
   bool refine_sensor_from_rig = true;
+
+  // Optional callback for monotonic progress reporting.
+  ProgressCallback progress_callback;
 };
 
 // High-level interface for rotation averaging.

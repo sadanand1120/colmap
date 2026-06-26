@@ -31,13 +31,18 @@
 
 #include "colmap/scene/database.h"
 
+#include <functional>
 #include <memory>
+#include <string>
 
 #include <ceres/ceres.h>
 
 namespace colmap {
 
 struct ViewGraphCalibrationOptions {
+  using ProgressCallback =
+      std::function<void(const std::string&, size_t, size_t)>;
+
   // Random seed for RANSAC-based estimation (-1 for random).
   int random_seed = -1;
 
@@ -65,6 +70,9 @@ struct ViewGraphCalibrationOptions {
 
   // The options for the solver.
   ceres::Solver::Options solver_options;
+
+  // Optional progress callback for bounded work.
+  ProgressCallback progress_callback;
 
   // Options for relative pose re-estimation.
   double relpose_max_error = 1.0;

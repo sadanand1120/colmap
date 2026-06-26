@@ -2223,7 +2223,10 @@ void GraphSolver::set_params(const SolverParams<double>& params) {
 
 size_t GraphSolver::get_allocation_size() { return allocation_size_; }
 
-SolveResult GraphSolver::solve(bool print_progress, bool verbose_logging) {
+SolveResult GraphSolver::solve(
+    bool print_progress,
+    bool verbose_logging,
+    std::function<void(int, int)> progress_callback) {
   cudaSetDevice(device_id_);
   SolveResult result;
   result.exit_reason = ExitReason::MAX_ITERATIONS;
@@ -2242,6 +2245,9 @@ SolveResult GraphSolver::solve(bool print_progress, bool verbose_logging) {
   score_best = DoResJacFirst();
   if (print_progress) {
     printf("                                 score_init: % .6e\n", score_best);
+  }
+  if (progress_callback) {
+    progress_callback(0, std::max(params_.solver_iter_max, 1));
   }
 
   for (solver_iter_ = 0; solver_iter_ < params_.solver_iter_max;
@@ -2402,6 +2408,14 @@ SolveResult GraphSolver::solve(bool print_progress, bool verbose_logging) {
       result.exit_reason = ExitReason::CONVERGED_SCORE_THRESHOLD;
       break;
     }
+    if (progress_callback) {
+      progress_callback(std::min(solver_iter_ + 1, params_.solver_iter_max),
+                        std::max(params_.solver_iter_max, 1));
+    }
+  }
+  if (progress_callback) {
+    progress_callback(std::min(solver_iter_ + 1, params_.solver_iter_max),
+                      std::max(params_.solver_iter_max, 1));
   }
 
   const auto t_final = std::chrono::steady_clock::now();

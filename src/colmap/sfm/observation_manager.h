@@ -36,6 +36,9 @@
 #include "colmap/util/enum_utils.h"
 #include "colmap/util/types.h"
 
+#include <functional>
+#include <string>
+
 namespace colmap {
 
 // Type of error metric used for filtering 3D point observations.
@@ -48,6 +51,9 @@ bool MergeAndFilterReconstructions(double max_reproj_error,
 
 class ObservationManager {
  public:
+  using ProgressCallback =
+      std::function<void(const std::string&, size_t, size_t)>;
+
   // The number of levels in the 3D point multi-resolution visibility pyramid.
   static constexpr int kNumPoint3DVisibilityPyramidLevels = 6;
 
@@ -74,6 +80,8 @@ class ObservationManager {
   // CorrespondenceGraph. Note: O(N) per call in the number of existing
   // images for image pair stats update.
   void AddImage(image_t image_id);
+
+  void SetProgressCallback(ProgressCallback progress_callback);
 
   // Add new 3D object, and return its unique ID.
   point3D_t AddPoint3D(
@@ -197,6 +205,9 @@ class ObservationManager {
   void ResetTriObservations(image_t image_id,
                             point2D_t point2D_idx,
                             bool is_deleted_point3D);
+  void ReportProgress(const std::string& label,
+                      size_t current,
+                      size_t total) const;
 
   struct ImageStat {
     // The number of image points that have at least one correspondence to
@@ -228,6 +239,7 @@ class ObservationManager {
   const std::shared_ptr<const CorrespondenceGraph> correspondence_graph_;
   std::unordered_map<image_pair_t, ImagePairStat> image_pair_stats_;
   std::unordered_map<image_t, ImageStat> image_stats_;
+  ProgressCallback progress_callback_;
 };
 
 std::ostream& operator<<(std::ostream& stream,

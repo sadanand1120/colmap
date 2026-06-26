@@ -42,6 +42,7 @@
 namespace colmap {
 
 class Timer;
+class MapperProgress;
 
 // NOLINTNEXTLINE(clang-analyzer-optin.performance.Padding)
 struct IncrementalPipelineOptions {
@@ -236,6 +237,8 @@ class IncrementalPipeline : public BaseController {
       std::shared_ptr<class DatabaseCache> database_cache,
       std::shared_ptr<class ReconstructionManager> reconstruction_manager);
 
+  ~IncrementalPipeline() override;
+
   void Run() override;
 
   // Getter functions for python pipelines.
@@ -280,6 +283,8 @@ class IncrementalPipeline : public BaseController {
   std::shared_ptr<class ReconstructionManager> reconstruction_manager_;
   std::shared_ptr<class DatabaseCache> database_cache_;
   std::shared_ptr<Timer> total_run_timer_;
+  std::unique_ptr<MapperProgress> progress_;
+  mutable bool reached_max_runtime_logged_ = false;
 };
 
 }  // namespace colmap

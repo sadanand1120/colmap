@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 #include "shared_indices.h"
@@ -191,7 +192,9 @@ class GraphSolver {
   /**
    * Run the solver.
    */
-  SolveResult solve(bool print_progress = false, bool verbose_logging = false);
+  SolveResult solve(bool print_progress = false,
+                    bool verbose_logging = false,
+                    std::function<void(int, int)> progress_callback = nullptr);
 
   /**
    * Finish the indices.

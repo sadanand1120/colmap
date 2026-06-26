@@ -95,6 +95,11 @@ IncrementalTriangulator::IncrementalTriangulator(
   }
 }
 
+void IncrementalTriangulator::SetProgressCallback(
+    ProgressCallback progress_callback) {
+  progress_callback_ = std::move(progress_callback);
+}
+
 size_t IncrementalTriangulator::TriangulateImage(const Options& options,
                                                  const image_t image_id) {
   THROW_CHECK(options.Check());
@@ -253,7 +258,10 @@ size_t IncrementalTriangulator::CompleteTracks(
 
   ClearCaches();
 
+  size_t point3D_idx = 0;
   for (const point3D_t point3D_id : point3D_ids) {
+    ReportProgress(
+        "Completing selected tracks", ++point3D_idx, point3D_ids.size());
     num_completed += Complete(options, point3D_id);
   }
 
@@ -267,7 +275,11 @@ size_t IncrementalTriangulator::CompleteAllTracks(const Options& options) {
 
   ClearCaches();
 
-  for (const point3D_t point3D_id : reconstruction_.Point3DIds()) {
+  const std::unordered_set<point3D_t> point3D_ids =
+      reconstruction_.Point3DIds();
+  size_t point3D_idx = 0;
+  for (const point3D_t point3D_id : point3D_ids) {
+    ReportProgress("Completing all tracks", ++point3D_idx, point3D_ids.size());
     num_completed += Complete(options, point3D_id);
   }
 
@@ -282,7 +294,10 @@ size_t IncrementalTriangulator::MergeTracks(
 
   ClearCaches();
 
+  size_t point3D_idx = 0;
   for (const point3D_t point3D_id : point3D_ids) {
+    ReportProgress(
+        "Merging selected tracks", ++point3D_idx, point3D_ids.size());
     num_merged += Merge(options, point3D_id);
   }
 
@@ -296,7 +311,11 @@ size_t IncrementalTriangulator::MergeAllTracks(const Options& options) {
 
   ClearCaches();
 
-  for (const point3D_t point3D_id : reconstruction_.Point3DIds()) {
+  const std::unordered_set<point3D_t> point3D_ids =
+      reconstruction_.Point3DIds();
+  size_t point3D_idx = 0;
+  for (const point3D_t point3D_id : point3D_ids) {
+    ReportProgress("Merging all tracks", ++point3D_idx, point3D_ids.size());
     num_merged += Merge(options, point3D_id);
   }
 
@@ -314,7 +333,11 @@ size_t IncrementalTriangulator::Retriangulate(const Options& options) {
   re_options.continue_max_angle_error = options.re_max_angle_error;
 
   FeatureMatches matches;
-  for (const auto& image_pair : obs_manager_->ImagePairs()) {
+  const auto& image_pairs = obs_manager_->ImagePairs();
+  size_t image_pair_idx = 0;
+  for (const auto& image_pair : image_pairs) {
+    ReportProgress(
+        "Retriangulating image pairs", ++image_pair_idx, image_pairs.size());
     // Only perform retriangulation for under-reconstructed image pairs.
     const double tri_ratio =
         static_cast<double>(image_pair.second.num_tri_corrs) /
@@ -430,6 +453,14 @@ void IncrementalTriangulator::ClearCaches() {
   camera_has_bogus_params_.clear();
   merge_trials_.clear();
   found_corrs_.clear();
+}
+
+void IncrementalTriangulator::ReportProgress(const std::string& label,
+                                             const size_t current,
+                                             const size_t total) const {
+  if (progress_callback_ && total > 1) {
+    progress_callback_(label, current, total);
+  }
 }
 
 size_t IncrementalTriangulator::Find(const Options& options,

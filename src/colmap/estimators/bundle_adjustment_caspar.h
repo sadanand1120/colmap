@@ -33,6 +33,7 @@
 
 #include <array>
 #include <cstddef>
+#include <functional>
 #include <vector>
 #ifdef CASPAR_ENABLED
 #ifdef CASPAR_USE_DOUBLE
@@ -105,6 +106,8 @@ namespace colmap {
 // round-trip through OptionManager regardless of the float/double build.
 // Also includes GPU index selection option
 struct CasparBundleAdjustmentOptions {
+  using ProgressCallback = std::function<void(int, int)>;
+
   int solver_iter_max = 200;
   int pcg_iter_max = 20;
   double diag_init = 1.0;
@@ -120,6 +123,7 @@ struct CasparBundleAdjustmentOptions {
   double solver_rel_decrease_min = 1.0;
   std::string gpu_index = "-1";
   bool collect_iteration_data = false;
+  ProgressCallback progress_callback;
 };
 
 std::unique_ptr<BundleAdjuster> CreateDefaultCasparBundleAdjuster(

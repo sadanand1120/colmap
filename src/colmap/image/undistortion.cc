@@ -274,10 +274,9 @@ void UndistortReconstruction(const UndistortCameraOptions& options,
   const std::unordered_map<camera_t, Camera> distorted_cameras =
       reconstruction->Cameras();
   for (const auto& camera : distorted_cameras) {
-    // IsUndistorted() is true for non-perspective cameras (e.g.
-    // EQUIRECTANGULAR), which cannot be undistorted to a pinhole, so they are
-    // left unchanged.
-    if (camera.second.IsUndistorted()) {
+    // Non-perspective cameras (e.g. EQUIRECTANGULAR) cannot be represented by
+    // a pinhole image plane, so they are left unchanged.
+    if (!camera.second.IsPerspective()) {
       continue;
     }
     reconstruction->Camera(camera.first) =
@@ -287,10 +286,8 @@ void UndistortReconstruction(const UndistortCameraOptions& options,
   for (const auto& distorted_image : reconstruction->Images()) {
     Image& image = reconstruction->Image(distorted_image.first);
     const Camera& distorted_camera = distorted_cameras.at(image.CameraId());
-    // Cameras left unchanged above (undistorted perspective cameras and all
-    // non-perspective cameras, e.g. EQUIRECTANGULAR) need no observation
-    // rewrite.
-    if (distorted_camera.IsUndistorted()) {
+    // Cameras left unchanged above need no observation rewrite.
+    if (!distorted_camera.IsPerspective()) {
       continue;
     }
     const Camera& undistorted_camera = *image.CameraPtr();

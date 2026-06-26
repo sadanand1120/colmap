@@ -66,6 +66,9 @@ struct FeatureMatchingOptions : public FeatureMatchingTypeOptions {
   // Number of threads for feature matching and geometric verification.
   int num_threads = -1;
 
+  // Number of GPU worker threads to launch per selected GPU.
+  int num_gpu_threads_per_gpu = 1;
+
   // Whether to use the GPU for feature matching.
 #ifdef COLMAP_GPU_ENABLED
   bool use_gpu = true;

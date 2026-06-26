@@ -243,6 +243,8 @@ void OptionManager::AddFeatureExtractionOptions() {
                        FeatureExtractorTypeFromString);
   AddDefaultOption("FeatureExtraction.num_threads",
                    &feature_extraction->num_threads);
+  AddDefaultOption("FeatureExtraction.num_gpu_threads_per_gpu",
+                   &feature_extraction->num_gpu_threads_per_gpu);
   AddDefaultOption("FeatureExtraction.use_gpu", &feature_extraction->use_gpu);
   AddDefaultOption("FeatureExtraction.gpu_index",
                    &feature_extraction->gpu_index);
@@ -298,6 +300,8 @@ void OptionManager::AddFeatureMatchingOptions() {
                        FeatureMatcherTypeFromString);
   AddDefaultOption("FeatureMatching.num_threads",
                    &feature_matching->num_threads);
+  AddDefaultOption("FeatureMatching.num_gpu_threads_per_gpu",
+                   &feature_matching->num_gpu_threads_per_gpu);
   AddDefaultOption("FeatureMatching.use_gpu", &feature_matching->use_gpu);
   AddDefaultOption("FeatureMatching.gpu_index", &feature_matching->gpu_index);
   AddDefaultOption("FeatureMatching.guided_matching",
@@ -806,6 +810,10 @@ void OptionManager::AddGlobalMapperOptions() {
                    &global_mapper->mapper.bundle_adjustment.refine_points3D);
   AddDefaultOption("GlobalMapper.ba_min_track_length",
                    &global_mapper->mapper.bundle_adjustment.min_track_length);
+  AddDefaultEnumOption("GlobalMapper.ba_backend",
+                       &global_mapper->mapper.bundle_adjustment.backend,
+                       BundleAdjustmentBackendToString,
+                       BundleAdjustmentBackendFromString);
   // Bundle adjustment options (Ceres-specific).
   AddDefaultOption("GlobalMapper.ba_ceres_use_gpu",
                    &global_mapper->mapper.bundle_adjustment.ceres->use_gpu);
@@ -817,6 +825,45 @@ void OptionManager::AddGlobalMapperOptions() {
   AddDefaultOption("GlobalMapper.ba_ceres_max_num_iterations",
                    &global_mapper->mapper.bundle_adjustment.ceres
                         ->solver_options.max_num_iterations);
+#ifdef CASPAR_ENABLED
+  // Bundle adjustment options (Caspar-specific).
+  AddDefaultOption(
+      "GlobalMapper.ba_caspar_solver_iter_max",
+      &global_mapper->mapper.bundle_adjustment.caspar->solver_iter_max);
+  AddDefaultOption(
+      "GlobalMapper.ba_caspar_pcg_iter_max",
+      &global_mapper->mapper.bundle_adjustment.caspar->pcg_iter_max);
+  AddDefaultOption("GlobalMapper.ba_caspar_diag_init",
+                   &global_mapper->mapper.bundle_adjustment.caspar->diag_init);
+  AddDefaultOption("GlobalMapper.ba_caspar_diag_min",
+                   &global_mapper->mapper.bundle_adjustment.caspar->diag_min);
+  AddDefaultOption(
+      "GlobalMapper.ba_caspar_diag_scaling_up",
+      &global_mapper->mapper.bundle_adjustment.caspar->diag_scaling_up);
+  AddDefaultOption(
+      "GlobalMapper.ba_caspar_diag_scaling_down",
+      &global_mapper->mapper.bundle_adjustment.caspar->diag_scaling_down);
+  AddDefaultOption(
+      "GlobalMapper.ba_caspar_diag_exit_value",
+      &global_mapper->mapper.bundle_adjustment.caspar->diag_exit_value);
+  AddDefaultOption(
+      "GlobalMapper.ba_caspar_score_exit_value",
+      &global_mapper->mapper.bundle_adjustment.caspar->score_exit_value);
+  AddDefaultOption(
+      "GlobalMapper.ba_caspar_pcg_rel_error_exit",
+      &global_mapper->mapper.bundle_adjustment.caspar->pcg_rel_error_exit);
+  AddDefaultOption(
+      "GlobalMapper.ba_caspar_pcg_rel_score_exit",
+      &global_mapper->mapper.bundle_adjustment.caspar->pcg_rel_score_exit);
+  AddDefaultOption(
+      "GlobalMapper.ba_caspar_pcg_rel_decrease_min",
+      &global_mapper->mapper.bundle_adjustment.caspar->pcg_rel_decrease_min);
+  AddDefaultOption(
+      "GlobalMapper.ba_caspar_solver_rel_decrease_min",
+      &global_mapper->mapper.bundle_adjustment.caspar->solver_rel_decrease_min);
+  AddDefaultOption("GlobalMapper.ba_caspar_gpu_index",
+                   &global_mapper->mapper.bundle_adjustment.caspar->gpu_index);
+#endif  // CASPAR_ENABLED
   AddDefaultOption("GlobalMapper.ba_skip_fixed_rotation_stage",
                    &global_mapper->mapper.ba_skip_fixed_rotation_stage);
   AddDefaultOption("GlobalMapper.ba_skip_joint_optimization_stage",
@@ -934,6 +981,8 @@ void OptionManager::AddPatchMatchStereoOptions() {
                    &patch_match_stereo->write_consistency_graph);
   AddDefaultOption("PatchMatchStereo.num_threads",
                    &patch_match_stereo->num_threads);
+  AddDefaultOption("PatchMatchStereo.num_gpu_threads_per_gpu",
+                   &patch_match_stereo->num_gpu_threads_per_gpu);
 }
 
 void OptionManager::AddStereoFusionOptions() {

@@ -934,7 +934,9 @@ class CasparBundleAdjuster : public BundleAdjuster {
     const bool collect_iters =
         options_.caspar && options_.caspar->collect_iteration_data;
     caspar::SolveResult result = solver.solve(
-        /*print_progress=*/false, /*verbose_logging=*/collect_iters);
+        /*print_progress=*/false,
+        /*verbose_logging=*/collect_iters,
+        options_.caspar ? options_.caspar->progress_callback : nullptr);
     ReadSolverResults(solver);
     WriteResultsToReconstruction();
 

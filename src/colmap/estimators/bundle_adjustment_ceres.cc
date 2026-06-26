@@ -38,11 +38,50 @@
 #include "colmap/util/misc.h"
 #include "colmap/util/threading.h"
 
+#include <cstdio>
 #include <iomanip>
+
+#ifndef _WIN32
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 namespace colmap {
 
 namespace {
+
+class ScopedStderrSilencer {
+ public:
+  explicit ScopedStderrSilencer(const bool enabled) {
+#ifndef _WIN32
+    if (!enabled) {
+      return;
+    }
+    std::fflush(stderr);
+    stderr_fd_ = dup(STDERR_FILENO);
+    const int null_fd = open("/dev/null", O_WRONLY);
+    if (stderr_fd_ >= 0 && null_fd >= 0) {
+      dup2(null_fd, STDERR_FILENO);
+    }
+    if (null_fd >= 0) {
+      close(null_fd);
+    }
+#endif
+  }
+
+  ~ScopedStderrSilencer() {
+#ifndef _WIN32
+    if (stderr_fd_ >= 0) {
+      std::fflush(stderr);
+      dup2(stderr_fd_, STDERR_FILENO);
+      close(stderr_fd_);
+    }
+#endif
+  }
+
+ private:
+  int stderr_fd_ = -1;
+};
 
 BundleAdjustmentTerminationType CeresTerminationTypeToTerminationType(
     ceres::TerminationType ceres_type) {
@@ -224,6 +263,7 @@ ceres::Solver::Options CeresBundleAdjustmentOptions::CreateSolverOptions(
 
 bool CeresBundleAdjustmentOptions::Check() const {
   CHECK_OPTION_GE(loss_function_scale, 0);
+  CHECK_OPTION_GE(solver_options.num_threads, -1);
   CHECK_OPTION_LT(max_num_images_direct_dense_cpu_solver,
                   max_num_images_direct_sparse_cpu_solver);
   CHECK_OPTION_LT(max_num_images_direct_dense_gpu_solver,
@@ -566,11 +606,25 @@ ceres::Solver::Summary SolveWithGpuFallback(
     const BundleAdjustmentOptions& options,
     const BundleAdjustmentConfig& config,
     ceres::Problem* problem) {
-  const ceres::Solver::Options solver_options =
+  ceres::Solver::Options solver_options =
       options.ceres->CreateSolverOptions(config, *problem);
+  std::unique_ptr<ceres::IterationCallback> progress_callback;
+  if (options.ceres->progress_callback_factory &&
+      solver_options.logging_type == ceres::LoggingType::SILENT &&
+      !solver_options.minimizer_progress_to_stdout) {
+    progress_callback =
+        options.ceres->progress_callback_factory(solver_options);
+    if (progress_callback) {
+      solver_options.callbacks.push_back(progress_callback.get());
+    }
+  }
 
   ceres::Solver::Summary ceres_summary;
-  ceres::Solve(solver_options, problem, &ceres_summary);
+  {
+    ScopedStderrSilencer silence_stderr(solver_options.logging_type ==
+                                        ceres::LoggingType::SILENT);
+    ceres::Solve(solver_options, problem, &ceres_summary);
+  }
 
   if (ceres_summary.termination_type == ceres::FAILURE &&
       options.ceres->use_gpu) {
@@ -583,9 +637,23 @@ ceres::Solver::Summary SolveWithGpuFallback(
       auto cpu_options =
           std::make_shared<CeresBundleAdjustmentOptions>(*options.ceres);
       cpu_options->use_gpu = false;
-      const ceres::Solver::Options cpu_solver_options =
+      ceres::Solver::Options cpu_solver_options =
           cpu_options->CreateSolverOptions(config, *problem);
-      ceres::Solve(cpu_solver_options, problem, &ceres_summary);
+      std::unique_ptr<ceres::IterationCallback> cpu_progress_callback;
+      if (cpu_options->progress_callback_factory &&
+          cpu_solver_options.logging_type == ceres::LoggingType::SILENT &&
+          !cpu_solver_options.minimizer_progress_to_stdout) {
+        cpu_progress_callback =
+            cpu_options->progress_callback_factory(cpu_solver_options);
+        if (cpu_progress_callback) {
+          cpu_solver_options.callbacks.push_back(cpu_progress_callback.get());
+        }
+      }
+      {
+        ScopedStderrSilencer silence_stderr(cpu_solver_options.logging_type ==
+                                            ceres::LoggingType::SILENT);
+        ceres::Solve(cpu_solver_options, problem, &ceres_summary);
+      }
     }
   }
 

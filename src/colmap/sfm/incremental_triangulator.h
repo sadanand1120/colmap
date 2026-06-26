@@ -33,7 +33,9 @@
 #include "colmap/scene/reconstruction.h"
 #include "colmap/sfm/observation_manager.h"
 
+#include <functional>
 #include <memory>
+#include <string>
 
 namespace colmap {
 
@@ -41,6 +43,9 @@ namespace colmap {
 // It holds the state and provides all functionality for triangulation.
 class IncrementalTriangulator {
  public:
+  using ProgressCallback =
+      std::function<void(const std::string&, size_t, size_t)>;
+
   struct Options {
     // Maximum transitivity to search for correspondences.
     int max_transitivity = 1;
@@ -105,6 +110,8 @@ class IncrementalTriangulator {
   // in the associated reconstruction.
   size_t TriangulateImage(const Options& options, image_t image_id);
 
+  void SetProgressCallback(ProgressCallback progress_callback);
+
   // Complete triangulations for image. Tries to create new tracks for not
   // yet triangulated observations and tries to complete existing tracks.
   // Returns the number of completed observations.
@@ -166,6 +173,10 @@ class IncrementalTriangulator {
   // Clear cache of bogus camera parameters and merge trials.
   void ClearCaches();
 
+  void ReportProgress(const std::string& label,
+                      size_t current,
+                      size_t total) const;
+
   // Find (transitive) correspondences to other images.
   size_t Find(const Options& options,
               image_t image_id,
@@ -200,6 +211,8 @@ class IncrementalTriangulator {
 
   // Class that is responsible for keeping track of 3D point statistics.
   std::shared_ptr<ObservationManager> obs_manager_;
+
+  ProgressCallback progress_callback_;
 
   // Cache for cameras with bogus parameters.
   std::unordered_map<camera_t, bool> camera_has_bogus_params_;

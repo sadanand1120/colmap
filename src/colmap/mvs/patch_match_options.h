@@ -108,6 +108,9 @@ struct PatchMatchOptions {
   // Number of threads for processing. -1 uses all available threads.
   int num_threads = -1;
 
+  // Number of GPU worker threads to launch per selected GPU.
+  int num_gpu_threads_per_gpu = 1;
+
   // Whether to add a regularized geometric consistency term to the cost
   // function. If true, the `depth_maps` and `normal_maps` must not be null.
   bool geom_consistency = true;
