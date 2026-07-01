@@ -11,6 +11,8 @@
 #include "colmap/estimators/caspar/caspar_model_adapter.h"
 #endif
 
+#include <string>
+
 namespace colmap {
 namespace {
 
@@ -46,16 +48,30 @@ class CasparBundleAdjuster : public BundleAdjuster {
     return ptr;
   }
 
+  ICasparModelAdapter* GetAdapterOrDie(const Camera& camera,
+                                       const char* context) {
+    ICasparModelAdapter* adapter = GetAdapter(camera.model_id);
+    if (adapter != nullptr) {
+      return adapter;
+    }
+
+    LOG(FATAL_THROW)
+        << context << ": camera " << camera.camera_id
+        << " uses unsupported camera model " << camera.ModelName()
+        << ". CASPAR bundle adjustment currently supports only PINHOLE and "
+           "SIMPLE_RADIAL. Use --ImageReader.camera_model SIMPLE_RADIAL or "
+           "PINHOLE when building the database, or use the CERES backend "
+           "(--Mapper.ba_local_backend CERES --Mapper.ba_global_backend CERES "
+           "for mapper, --GlobalMapper.ba_backend CERES for global_mapper, or "
+           "--BundleAdjustment.backend CERES for bundle_adjuster).";
+    return nullptr;
+  }
+
   void BuildObservationCounts() {
     for (const image_t image_id : config_.Images()) {
       const Image& image = reconstruction_.Image(image_id);
       const Camera& camera = *image.CameraPtr();
-      if (!GetAdapter(camera.model_id)) {
-        LOG(WARNING) << "Skipping image " << image_id
-                     << " with unsupported camera model: "
-                     << camera.ModelName();
-        continue;
-      }
+      GetAdapterOrDie(camera, "CASPAR BA observation setup");
       for (const Point2D& point2D : image.Points2D()) {
         if (!point2D.HasPoint3D() ||
             config_.IsIgnoredPoint(point2D.point3D_id)) {
@@ -78,9 +94,8 @@ class CasparBundleAdjuster : public BundleAdjuster {
       if (!config_.HasImage(track_el.image_id)) {
         Image& image = reconstruction_.Image(track_el.image_id);
         Camera& camera = *image.CameraPtr();
-        if (GetAdapter(camera.model_id)) {
-          point3D_num_observations_[point3D_id]++;
-        }
+        GetAdapterOrDie(camera, "CASPAR BA external observation setup");
+        point3D_num_observations_[point3D_id]++;
       }
     }
   }
@@ -106,9 +121,7 @@ class CasparBundleAdjuster : public BundleAdjuster {
 
     for (const camera_t camera_id : sorted_camera_ids) {
       const Camera& camera = reconstruction_.Camera(camera_id);
-      if (!GetAdapter(camera.model_id)) {
-        continue;
-      }
+      GetAdapterOrDie(camera, "CASPAR BA calibration setup");
       GetOrCreateCalibration(camera_id, camera);
     }
   }
@@ -118,6 +131,7 @@ class CasparBundleAdjuster : public BundleAdjuster {
     for (const image_t image_id : config_.Images()) {
       const Image& image = reconstruction_.Image(image_id);
       const Camera& camera = reconstruction_.Camera(image.CameraId());
+      GetAdapterOrDie(camera, "CASPAR BA pose setup");
       frame_to_model.emplace(image.FrameId(), camera.model_id);
     }
     for (const auto& [frame_id, model_id] : frame_to_model) {
@@ -165,23 +179,20 @@ class CasparBundleAdjuster : public BundleAdjuster {
 
       if (camera_id != prev_camera_id) {
         camera_ptr = &reconstruction_.Camera(camera_id);
-        adapter = GetAdapter(camera_ptr->model_id);
-        if (adapter) {
-          if (options_.refine_focal_length != options_.refine_extra_params &&
-              !config_.HasConstantCamIntrinsics(camera_id) &&
-              !cameras_from_outside_config_.count(camera_id)) {
-            LOG(FATAL_THROW)
-                << "Camera " << camera_id
-                << ": refine_focal_length != refine_extra_params is not "
-                   "supported by CASPAR's merged focal_and_extra block.";
-          }
-          focal_and_extra = IsFocalAndExtraVariable(camera_id);
-          principal_point_var = IsPrincipalPointVariable(camera_id);
-          calib_idx = GetOrCreateCalibration(camera_id, *camera_ptr);
+        adapter = GetAdapterOrDie(*camera_ptr, "CASPAR BA factor setup");
+        if (options_.refine_focal_length != options_.refine_extra_params &&
+            !config_.HasConstantCamIntrinsics(camera_id) &&
+            !cameras_from_outside_config_.count(camera_id)) {
+          LOG(FATAL_THROW)
+              << "Camera " << camera_id
+              << ": refine_focal_length != refine_extra_params is not "
+                 "supported by CASPAR's merged focal_and_extra block.";
         }
+        focal_and_extra = IsFocalAndExtraVariable(camera_id);
+        principal_point_var = IsPrincipalPointVariable(camera_id);
+        calib_idx = GetOrCreateCalibration(camera_id, *camera_ptr);
         prev_camera_id = camera_id;
       }
-      if (!adapter) continue;
 
       if (options_.refine_sensor_from_rig) {
         const Frame& frame = *image.FramePtr();
@@ -233,13 +244,8 @@ class CasparBundleAdjuster : public BundleAdjuster {
       }
       Image& image = reconstruction_.Image(track_el.image_id);
       Camera& camera = *image.CameraPtr();
-      ICasparModelAdapter* adapter = GetAdapter(camera.model_id);
-      if (!adapter) {
-        LOG(WARNING) << "Skipping external observation with unsupported "
-                        "camera model: "
-                     << camera.ModelName();
-        continue;
-      }
+      ICasparModelAdapter* adapter =
+          GetAdapterOrDie(camera, "CASPAR BA external factor setup");
       // Mark frame and camera as external so that IsPoseVariable and
       // IsFocalAndExtraVariable return false for all external
       // observations.
@@ -421,7 +427,8 @@ class CasparBundleAdjuster : public BundleAdjuster {
                                 const Camera& camera) {
     auto [it, inserted] = camera_to_calib_index_.try_emplace(camera_id, 0);
     if (inserted) {
-      ICasparModelAdapter* adapter = GetAdapter(camera.model_id);
+      ICasparModelAdapter* adapter =
+          GetAdapterOrDie(camera, "CASPAR BA calibration setup");
       size_t& model_calib_count = calib_num_per_model_[camera.model_id];
       it->second = model_calib_count;
       calib_index_to_camera_[{camera.model_id, model_calib_count}] = camera_id;
@@ -441,7 +448,7 @@ class CasparBundleAdjuster : public BundleAdjuster {
   }
 
   // Both focal and extra_params must be refined together (merged block).
-  // If they disagree, observations are skipped. See AddFactorForObservation.
+  // If they disagree, AddFactors fails with an explicit error.
   bool IsFocalAndExtraVariable(const camera_t camera_id) const {
     return options_.refine_focal_length && options_.refine_extra_params &&
            !config_.HasConstantCamIntrinsics(camera_id) &&
@@ -720,7 +727,8 @@ class CasparBundleAdjuster : public BundleAdjuster {
         continue;
       }
       Camera& camera = reconstruction_.Camera(camera_id);
-      ICasparModelAdapter* adapter = GetAdapter(camera.model_id);
+      ICasparModelAdapter* adapter =
+          GetAdapterOrDie(camera, "CASPAR BA calibration writeback");
       const ModelData& md = model_data_per_model_.at(camera.model_id);
       const std::string params_before = camera.ParamsToString();
       if (IsFocalAndExtraVariable(camera_id)) {
